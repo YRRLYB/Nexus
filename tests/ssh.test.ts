@@ -10,6 +10,10 @@ import { connectSSH, executeSSH, withSFTP, listSFTP } from '../electron/ssh';
 import { previewSFTP } from '../electron/preview';
 import { TEXT_PREVIEW_BYTES } from '../shared/preview';
 import type { Device } from '../shared/types';
+import { Sessions } from '../electron/sessions';
+import { Transfers } from '../electron/transfers';
+import { Deployments, PREFLIGHT_COMMAND } from '../electron/deployment';
+import { checkedEnvironment } from './fixtures/operations';
 const { STATUS_CODE } = utils.sftp;
 test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and file mutations', async () => {
   const root = await mkdtemp(join(tmpdir(), 'nexus-sftp-'));
@@ -19,6 +23,12 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
     privateKeyEncoding: { format: 'pem', type: 'pkcs1' },
     publicKeyEncoding: { format: 'pem', type: 'pkcs1' },
   }).privateKey;
+  let installExit = 0;
+  let installed = false;
+  let changedEnvironment = false;
+  const installedScripts: string[] = [];
+  let shellInput = '';
+  let resized = false;
   const server = new Server({ hostKeys: [privateKey] }, (client) => {
     client.on('error', () => {});
     client.on('authentication', (ctx) => {
@@ -29,9 +39,49 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
     client.on('ready', () =>
       client.on('session', (accept) => {
         const session = accept();
+        session.on('pty', (accept) => accept());
+        session.on('window-change', (accept) => {
+          resized = true;
+          accept?.();
+        });
+        session.on('shell', (accept) => {
+          const stream = accept();
+          stream.write(Buffer.from('你好 shell\r\n').subarray(0, 2));
+          stream.write(Buffer.from('你好 shell\r\n').subarray(2));
+          stream.on('data', (data: Buffer) => {
+            shellInput += data.toString();
+            stream.write('echo:' + data.toString());
+          });
+        });
         session.on('exec', (accept, _reject, info) => {
           const stream = accept();
-          if (info.command === 'success') {
+          if (info.command === PREFLIGHT_COMMAND) {
+            stream.write(
+              checkedEnvironment({
+                distribution: changedEnvironment ? 'ubuntu' : 'debian',
+                docker: installed ? '1' : '0',
+              }),
+            );
+            stream.exit(0);
+          } else if (info.command.includes('mktemp -d /tmp/nexus-deploy')) {
+            const temporary = '/tmp/nexus-deploy.TEST' + installedScripts.length;
+            fs.mkdirSync(join(root, temporary), { recursive: true });
+            stream.write(temporary + '\n');
+            stream.exit(0);
+          } else if (
+            info.command.includes('installer.sh') &&
+            info.command.includes('Checking installation')
+          ) {
+            const installer = fs
+              .readdirSync(join(root, 'tmp'))
+              .find((name) => fs.existsSync(join(root, 'tmp', name, 'installer.sh')))!;
+            installedScripts.push(
+              fs.readFileSync(join(root, 'tmp', installer, 'installer.sh'), 'utf8'),
+            );
+            assert.match(info.command, /docker version/);
+            stream.write('fixture installation\n');
+            stream.exit(installExit);
+          } else if (info.command === 'success') {
             stream.write('fixture output');
             stream.exit(0);
           } else {
@@ -216,6 +266,28 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
     clients.push(client);
     return client;
   };
+  const waitFor = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 10_000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error('Fixture timed out');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const terminalOutput: Buffer[] = [];
+  const sessions = new Sessions(
+    (output) => {
+      terminalOutput.push(Buffer.from(output.data, 'base64'));
+      sessions.acknowledge(output.id, output.bytes);
+    },
+    () => {},
+  );
+  let cancelOnce = false;
+  const transfers = new Transfers(connect, (task) => {
+    if (cancelOnce && task.name === 'cancel.bin' && task.transferred > 0) {
+      cancelOnce = false;
+      transfers.cancel(task.id);
+    }
+  });
   try {
     await assert.rejects(
       connectSSH(device, { password: 'fixture-pass' }, async () => false),
@@ -265,7 +337,123 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
       withSFTP(await connect(), async () => new Promise<void>(() => {}), 20),
       /超时/,
     );
+    const shell = await sessions.open(await connect(), {
+      deviceId: device.id,
+      title: 'Fixture',
+      kind: 'shell',
+    });
+    const snapshot = sessions.attach(shell.id);
+    terminalOutput.push(Buffer.from(snapshot.data, 'base64'));
+    sessions.write(shell.id, 'input\r');
+    sessions.resize(shell.id, 120, 35);
+    await waitFor(() => shellInput.includes('input') && resized);
+    await waitFor(() => Buffer.concat(terminalOutput).toString('utf8').includes('echo:input'));
+    assert.match(Buffer.concat(terminalOutput).toString('utf8'), /你好 shell/);
+    sessions.detach(shell.id);
+    sessions.close(shell.id);
+    assert.equal(sessions.list().length, 0);
+
+    const deployments = new Deployments(
+      connect,
+      () => 'fixture-identity',
+      sessions,
+      async () => '#!/bin/sh\necho safe fixture\n',
+    );
+    const plan = await deployments.prepare(device.id, 'docker');
+    assert.match(plan.sha256, /^[a-f0-9]{64}$/);
+    const reviewed = plan.script;
+    plan.script = '#!/bin/sh\necho renderer cannot change the reviewed script\n';
+    const deployment = await deployments.start(plan.id);
+    await waitFor(
+      () => sessions.list().find((item) => item.id === deployment.id)?.state === 'complete',
+    );
+    assert.equal(installedScripts[0], reviewed);
+    await assert.rejects(deployments.start(plan.id), /过期/);
+    installExit = 1;
+    const failedPlan = await deployments.prepare(device.id, 'docker');
+    const failed = await deployments.start(failedPlan.id);
+    await waitFor(() => sessions.list().find((item) => item.id === failed.id)?.state === 'failed');
+    installed = true;
+    const blocked = await deployments.prepare(device.id, 'docker');
+    await assert.rejects(deployments.start(blocked.id), /已安装/);
+    installed = false;
+    const changed = await deployments.prepare(device.id, 'docker');
+    changedEnvironment = true;
+    await assert.rejects(deployments.start(changed.id), /环境已变化/);
+    changedEnvironment = false;
+
+    fs.mkdirSync(join(downloads, 'tree', 'nested'), { recursive: true });
+    fs.mkdirSync(join(downloads, 'tree', 'empty'));
+    await writeFile(join(downloads, 'tree', 'nested', '你好.txt'), 'nested content');
+    await writeFile(join(downloads, 'tree', 'zero.txt'), '');
+    const uploaded = transfers.enqueue(device.id, 'upload', join(downloads, 'tree'), '/');
+    await waitFor(
+      () => transfers.list().find((item) => item.id === uploaded.id)?.state === 'complete',
+    );
+    assert.equal(
+      await readFile(join(root, 'tree', 'nested', '你好.txt'), 'utf8'),
+      'nested content',
+    );
+    fs.mkdirSync(join(downloads, 'received'));
+    const downloaded = transfers.enqueue(
+      device.id,
+      'download',
+      '/tree',
+      join(downloads, 'received'),
+    );
+    await waitFor(
+      () => transfers.list().find((item) => item.id === downloaded.id)?.state === 'complete',
+    );
+    assert.equal(
+      await readFile(join(downloads, 'received', 'tree', 'nested', '你好.txt'), 'utf8'),
+      'nested content',
+    );
+    assert.ok(fs.statSync(join(downloads, 'received', 'tree', 'empty')).isDirectory());
+    const conflict = transfers.enqueue(device.id, 'download', '/tree', join(downloads, 'received'));
+    await waitFor(
+      () => transfers.list().find((item) => item.id === conflict.id)?.state === 'failed',
+    );
+    assert.match(transfers.list().find((item) => item.id === conflict.id)!.error!, /不覆盖/);
+    const queued = transfers.enqueue(
+      device.id,
+      'download',
+      '/hello.txt',
+      join(downloads, 'received'),
+    );
+    transfers.cancel(queued.id);
+    assert.equal(transfers.list().find((item) => item.id === queued.id)?.state, 'cancelled');
+    transfers.retry(queued.id);
+    await waitFor(
+      () => transfers.list().find((item) => item.id === queued.id)?.state === 'complete',
+    );
+    await writeFile(join(downloads, 'cancel.bin'), Buffer.alloc(1024 * 1024, 'a'));
+    cancelOnce = true;
+    const cancelled = transfers.enqueue(device.id, 'upload', join(downloads, 'cancel.bin'), '/');
+    await waitFor(
+      () =>
+        transfers.list().find((item) => item.id === cancelled.id)?.state === 'cancelled' &&
+        !!transfers.list().find((item) => item.id === cancelled.id)?.error,
+    );
+    await waitFor(() => !fs.readdirSync(root).some((name) => name.includes('nexus-part')));
+    transfers.retry(cancelled.id);
+    await waitFor(
+      () => transfers.list().find((item) => item.id === cancelled.id)?.state === 'complete',
+    );
+    assert.equal(fs.statSync(join(root, 'cancel.bin')).size, 1024 * 1024);
+    await writeFile(join(root, '.hidden'), 'hidden file');
+    const hidden = transfers.enqueue(
+      device.id,
+      'download',
+      '/.hidden',
+      join(downloads, 'received'),
+    );
+    await waitFor(
+      () => transfers.list().find((item) => item.id === hidden.id)?.state === 'complete',
+    );
+    assert.equal(await readFile(join(downloads, 'received', '.hidden'), 'utf8'), 'hidden file');
   } finally {
+    sessions.dispose();
+    transfers.dispose();
     clients.forEach((c) => c.destroy());
     await new Promise<void>((r) => server.close(() => r()));
     await rm(root, { recursive: true, force: true });

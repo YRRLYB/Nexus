@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, safeStorage, Menu } from 'electron';
-import { join, basename, posix, resolve } from 'node:path';
-import { readFile, readdir, lstat, stat, rename, unlink } from 'node:fs/promises';
+import { app, BrowserWindow, ipcMain, dialog, clipboard, safeStorage, Menu, net } from 'electron';
+import { join, resolve } from 'node:path';
+import { readFile, readdir, lstat, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -12,6 +12,10 @@ import { previewLocal, previewSFTP } from './preview';
 import { installCommand, quickCommand } from './device';
 import { devicePlatform } from '../shared/device';
 import { systemSSHStatus } from './terminal';
+import { Sessions } from './sessions';
+import { Deployments, fetchInstaller, toolNames, probeInstallSchema } from './deployment';
+import { Transfers } from './transfers';
+import probeInstaller from '../scripts/probe/install.sh';
 import {
   deviceSchema,
   inputSchema,
@@ -20,17 +24,12 @@ import {
   sshArgs,
   psQuote,
 } from '../shared/validation';
-import type {
-  Capability,
-  FileListing,
-  PowerState,
-  ProbeSnapshot,
-  TransferProgress,
-} from '../shared/types';
+import type { Capability, FileListing, PowerState, ProbeSnapshot } from '../shared/types';
 
 if (process.env.NEXUS_DATA_DIR) app.setPath('userData', resolve(process.env.NEXUS_DATA_DIR));
 let window: BrowserWindow;
 let store: Store;
+let quitting = false;
 const states: Record<string, PowerState> = {};
 const discoveryCache = new DiscoveryCache();
 let probeFlight: Promise<ProbeSnapshot> | undefined;
@@ -38,6 +37,27 @@ let probeFlightRevision = -1;
 let probeController: AbortController | undefined;
 let settingsRevision = 0;
 const uid = (id: unknown) => z.string().uuid().parse(id);
+function send(name: string, value: unknown) {
+  if (window && !window.isDestroyed()) window.webContents.send(name, value);
+}
+const sessions = new Sessions(
+  (output) => send('session:output', output),
+  (session) => send('session:state', session),
+);
+const deployments = new Deployments(
+  (id) => connection(id, 'ssh'),
+  (id) => JSON.stringify(deviceWith(id, 'ssh').connection),
+  sessions,
+  (tool) =>
+    tool === 'probe'
+      ? Promise.resolve(probeInstaller)
+      : fetchInstaller(tool, net.fetch as typeof fetch),
+);
+const transfers = new Transfers(
+  (id, signal) => connection(id, 'sftp', signal),
+  (task) => send('transfer:state', task),
+  (id) => JSON.stringify(deviceWith(id, 'sftp').connection),
+);
 function vaultAvailable() {
   return (
     safeStorage.isEncryptionAvailable() &&
@@ -62,22 +82,28 @@ function deviceWith(id: unknown, capability: Capability) {
   if (!d.connection.host) throw new Error('请先编辑设备，填写 SSH 地址');
   return d;
 }
-async function connection(id: string, capability: Capability) {
+async function connection(id: string, capability: Capability, signal?: AbortSignal) {
+  if (quitting) throw new Error('应用正在退出');
   const d = deviceWith(id, capability);
-  return connectSSH(d, store.credential(d.id), async (address, fingerprint) => {
-    const previous = store.hostKey(address);
-    if (previous === fingerprint) return true;
-    if (previous)
-      throw new Error(
-        'SSH 主机密钥已变化。请核实服务器身份后，在数据目录中备份并人工处理主机信任记录。',
+  return connectSSH(
+    d,
+    store.credential(d.id),
+    async (address, fingerprint) => {
+      const previous = store.hostKey(address);
+      if (previous === fingerprint) return true;
+      if (previous)
+        throw new Error(
+          'SSH 主机密钥已变化。请核实服务器身份后，在数据目录中备份并人工处理主机信任记录。',
+        );
+      const accepted = await confirm(
+        '信任这台服务器的 SSH 主机密钥？',
+        `${d.name}\n${address}\n\n${fingerprint}\n\n请与服务器提供的指纹核对。信任记录保存在本机。`,
       );
-    const accepted = await confirm(
-      '信任这台服务器的 SSH 主机密钥？',
-      `${d.name}\n${address}\n\n${fingerprint}\n\n请与服务器提供的指纹核对。信任记录保存在本机。`,
-    );
-    if (accepted) store.trustHost(address, fingerprint);
-    return accepted;
-  });
+      if (accepted) store.trustHost(address, fingerprint);
+      return accepted;
+    },
+    signal,
+  );
 }
 function register(name: string, handler: (...args: any[]) => any) {
   ipcMain.handle(name, (event, ...args) => {
@@ -171,6 +197,10 @@ function setupIPC() {
     )
       return false;
     store.deleteDevice(d.id);
+    transfers.cancelDevice(d.id);
+    deployments.cancelled(d.id);
+    for (const session of sessions.list())
+      if (session.deviceId === d.id) sessions.close(session.id);
     discoveryCache.invalidate(d.id);
     delete states[d.id];
     return true;
@@ -184,6 +214,68 @@ function setupIPC() {
     return saved;
   });
   register('probe:poll', pollProbe);
+  register('session:list', () => sessions.list());
+  register('session:open', async (id) => {
+    const device = deviceWith(id, 'ssh');
+    sessions.assertCapacity();
+    return sessions.open(await connection(device.id, 'ssh'), {
+      deviceId: device.id,
+      title: device.name,
+      kind: 'shell',
+    });
+  });
+  register('session:attach', (id) => sessions.attach(uid(id)));
+  register('session:detach', (id) => sessions.detach(uid(id)));
+  register('session:input', (id, data) =>
+    sessions.write(uid(id), z.string().max(8192).parse(data)),
+  );
+  register('session:resize', (id, cols, rows) =>
+    sessions.resize(
+      uid(id),
+      z.number().int().min(2).max(500).parse(cols),
+      z.number().int().min(1).max(200).parse(rows),
+    ),
+  );
+  register('session:ack', (id, bytes) =>
+    sessions.acknowledge(
+      uid(id),
+      z
+        .number()
+        .int()
+        .min(0)
+        .max(1024 * 1024)
+        .parse(bytes),
+    ),
+  );
+  register('session:close', (id) => {
+    const session = sessions.list().find((item) => item.id === uid(id));
+    sessions.close(uid(id));
+    if (session?.kind === 'deployment') deployments.cancelled(session.deviceId);
+  });
+  register('deploy:prepare', async (id, tool) => {
+    const device = deviceWith(id, 'ssh');
+    deviceWith(id, 'sftp');
+    if (devicePlatform(device) !== 'linux') throw new Error('自动部署仅支持 Linux 设备');
+    return deployments.prepare(device.id, z.enum(['docker', 'baota', 'probe']).parse(tool));
+  });
+  register('deploy:start', async (id, options) => {
+    const plan = deployments.get(uid(id));
+    const device = deviceWith(plan.deviceId, 'ssh');
+    deviceWith(plan.deviceId, 'sftp');
+    const parameters = plan.tool === 'probe' ? probeInstallSchema.parse(options) : undefined;
+    if (
+      !(await confirm(
+        `在 ${device.name} 上安装 ${toolNames[plan.tool]}？`,
+        `${device.connection.username}@${device.connection.host}:${device.connection.port}\n来源：${plan.source}\nSHA-256：${plan.sha256}\n\n安装将修改软件包、服务和系统配置。第三方脚本还会下载组件；请先检查脚本并备份服务器。取消不会回滚已完成的改动。`,
+        true,
+      ))
+    )
+      return null;
+    return deployments.start(plan.id, parameters);
+  });
+  register('transfer:list', () => transfers.list());
+  register('transfer:cancel', (id) => transfers.cancel(uid(id)));
+  register('transfer:retry', (id) => transfers.retry(uid(id)));
   register('device:discover', async (id, refresh = false) => {
     const d = deviceWith(id, 'ssh');
     if (devicePlatform(d) !== 'linux') throw new Error('运行识别目前支持 Linux 服务器');
@@ -346,82 +438,33 @@ function setupIPC() {
     const p = remotePath(path);
     return withSFTP(await connection(uid(id), 'sftp'), (s) => previewSFTP(s, p), 30_000);
   });
-  register('remote:upload', async (id, remoteDir, paths) => {
-    uid(id);
+  register('remote:upload', async (id, remoteDir, paths, folders = false) => {
+    const device = deviceWith(id, 'sftp');
     const directory = remotePath(remoteDir);
+    const folder = z.boolean().parse(folders);
     const selected =
       paths === undefined
         ? (
             await dialog.showOpenDialog(window, {
-              title: '选择上传的文件',
-              properties: ['openFile', 'multiSelections'],
+              title: folder ? '选择上传的目录' : '选择上传的文件',
+              properties: [folder ? 'openDirectory' : 'openFile', 'multiSelections'],
             })
           ).filePaths
         : z.array(z.string().min(1).max(4096)).max(200).parse(paths);
-    if (!selected.length) return 0;
-    const locals = await Promise.all(
-      selected.map(async (path) => {
-        const info = await stat(path);
-        if (!info.isFile()) throw new Error('当前仅支持上传文件，请先将目录打包');
-        return path;
-      }),
+    return selected.map((source) =>
+      transfers.enqueue(device.id, 'upload', resolve(source), directory),
     );
-    return withSFTP(await connection(id, 'sftp'), async (sftp) => {
-      let count = 0;
-      for (const local of locals) {
-        const target = posix.join(directory, basename(local));
-        const existing = await new Promise<boolean>((done, reject) =>
-          sftp.lstat(target, (e) =>
-            e ? ((e as any).code === 2 ? done(false) : reject(e)) : done(true),
-          ),
-        );
-        if (existing && !(await confirm('覆盖远程文件？', target, true))) continue;
-        await new Promise<void>((done, reject) =>
-          sftp.fastPut(
-            local,
-            target,
-            {
-              step: (transferred, _, total) =>
-                progress({ name: basename(local), transferred, total }),
-            },
-            (error) => (error ? reject(error) : done()),
-          ),
-        );
-        count++;
-      }
-      return count;
-    });
   });
   register('remote:download', async (id, path) => {
-    uid(id);
+    const device = deviceWith(id, 'sftp');
     const source = remotePath(path);
-    const result = await dialog.showSaveDialog(window, {
-      defaultPath: join(app.getPath('downloads'), posix.basename(source)),
+    const result = await dialog.showOpenDialog(window, {
+      title: '选择下载到的文件夹',
+      defaultPath: app.getPath('downloads'),
+      properties: ['openDirectory', 'createDirectory'],
     });
-    if (result.canceled || !result.filePath) return false;
-    const dest = result.filePath;
-    const temp = dest + '.' + crypto.randomUUID() + '.nexus-part';
-    try {
-      await withSFTP(
-        await connection(id, 'sftp'),
-        (sftp) =>
-          new Promise<void>((done, reject) =>
-            sftp.fastGet(
-              source,
-              temp,
-              {
-                step: (transferred, _, total) =>
-                  progress({ name: posix.basename(source), transferred, total }),
-              },
-              (error) => (error ? reject(error) : done()),
-            ),
-          ),
-      );
-      await rename(temp, dest);
-      return true;
-    } finally {
-      await unlink(temp).catch(() => {});
-    }
+    if (result.canceled || !result.filePaths[0]) return null;
+    return transfers.enqueue(device.id, 'download', source, result.filePaths[0]);
   });
   register('remote:mutate', async (id, action, path, target) => {
     uid(id);
@@ -459,9 +502,6 @@ function setupIPC() {
     );
     return true;
   });
-}
-function progress(value: TransferProgress) {
-  if (!window.isDestroyed()) window.webContents.send('transfer:progress', value);
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -533,4 +573,9 @@ else {
     });
 }
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => store?.close());
+app.on('will-quit', () => {
+  quitting = true;
+  sessions.dispose();
+  transfers.dispose();
+  store?.close();
+});

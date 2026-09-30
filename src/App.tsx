@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -38,6 +38,12 @@ import {
   readPreferences,
   type DesktopPreferences,
 } from './DesktopTools';
+const Deployment = lazy(() =>
+  import('./Deployment').then((module) => ({ default: module.Deployment })),
+);
+const TerminalWorkspace = lazy(() =>
+  import('./Terminal').then((module) => ({ default: module.TerminalWorkspace })),
+);
 
 export function App() {
   const [info, setInfo] = useState<Bootstrap | null>(null);
@@ -48,6 +54,9 @@ export function App() {
   const [editing, setEditing] = useState<Device | null>(null);
   const [settings, showSettings] = useState(false);
   const [files, setFiles] = useState<Device | null>(null);
+  const [deployment, setDeployment] = useState<Device | null>(null);
+  const [terminal, setTerminal] = useState('');
+  const [terminalVisible, showTerminal] = useState(false);
   const [discoveryRevision, setDiscoveryRevision] = useState(0);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
@@ -78,7 +87,7 @@ export function App() {
         void api.setFullScreen(!fullScreen);
         return;
       }
-      if (editing || settings || files || output) return;
+      if (editing || settings || files || output || deployment || terminalVisible) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setSearch((value) => !value);
@@ -90,7 +99,7 @@ export function App() {
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
-  }, [editing, settings, files, output, search, selected, fullScreen]);
+  }, [editing, settings, files, output, deployment, terminalVisible, search, selected, fullScreen]);
   const [toast, setToast] = useState('');
   const [busy, setBusy] = useState(false);
   const [polling, setPolling] = useState(false);
@@ -501,7 +510,19 @@ export function App() {
                     <button
                       className="primary"
                       disabled={busy}
-                      onClick={() => void run(() => api.openSSH(device.id), '已打开系统 SSH 终端')}
+                      onClick={() =>
+                        void run(async () => {
+                          const existing = (await api.sessions()).find(
+                            (item) =>
+                              item.kind === 'shell' &&
+                              item.deviceId === device.id &&
+                              item.state === 'running',
+                          );
+                          const session = existing || (await api.openTerminal(device.id));
+                          setTerminal(session.id);
+                          showTerminal(true);
+                        })
+                      }
                     >
                       <Terminal size={17} />
                       SSH 连接
@@ -526,32 +547,13 @@ export function App() {
                 </section>
                 {profile?.deployment && device.capabilities.ssh && (
                   <section className="detail-section install-section">
-                    <div className="section-label">安装引导</div>
+                    <div className="section-label">服务器软件</div>
                     <p className="helper">
-                      复制后在目标 Linux 服务器执行。脚本会先显示内容，再请求 sudo；请先审阅命令。
+                      通过 SSH 安装 Docker、宝塔面板或探针。安装前检查服务器环境并确认脚本。
                     </p>
                     <div className="copy-actions">
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          void run(
-                            () => api.copyInstallCommand(device.id, 'docker'),
-                            'Docker 安装命令已复制',
-                          )
-                        }
-                      >
-                        复制 Docker 安装命令
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() =>
-                          void run(
-                            () => api.copyInstallCommand(device.id, 'probe'),
-                            '探针安装命令已复制',
-                          )
-                        }
-                      >
-                        复制探针安装命令
+                      <button disabled={busy} onClick={() => setDeployment(device)}>
+                        部署软件
                       </button>
                     </div>
                   </section>
@@ -831,6 +833,22 @@ export function App() {
         />
       )}
       {files && <Files device={files} close={() => setFiles(null)} />}
+      <Suspense fallback={<div className="busy-indicator">正在打开…</div>}>
+        {deployment && <Deployment device={deployment} close={() => setDeployment(null)} />}
+        {terminalVisible && (
+          <TerminalWorkspace
+            initial={terminal}
+            devices={devices}
+            close={() => showTerminal(false)}
+          />
+        )}
+      </Suspense>
+      {terminal && !terminalVisible && (
+        <button className="session-launcher" onClick={() => showTerminal(true)}>
+          <Terminal size={16} />
+          SSH 会话
+        </button>
+      )}
       {output && (
         <Modal wide title={output.title} subtitle={device?.name} close={() => setOutput(null)}>
           <pre className="command-output">{output.text || '命令执行成功，没有输出。'}</pre>

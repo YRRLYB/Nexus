@@ -18,14 +18,14 @@ export function SSHGuide() {
     <section className="ssh-guide">
       <h3>Windows 可以使用 SSH</h3>
       <p className="helper">
-        从 Windows 连接服务器只需要本机 OpenSSH Client；让其他设备连接 Windows 则需要在目标 Windows
-        上安装 OpenSSH Server。
+        Nexus 内置 SSH 终端和 SFTP，不需要本机 ssh.exe。使用外部 PowerShell 的 ssh 命令时才需要
+        OpenSSH Client；让其他设备连接 Windows 则需要在目标 Windows 上安装 OpenSSH Server。
       </p>
       <p className="helper" role="status">
         {status
           ? status.available
             ? `本机已检测到 ${status.version}`
-            : '本机未检测到 OpenSSH Client。内置 SFTP 不依赖系统 ssh.exe。'
+            : '本机未检测到 OpenSSH Client；不影响 Nexus 内置终端和 SFTP。'
           : '正在检测本机 OpenSSH…'}
       </p>
       <details>

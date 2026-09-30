@@ -12,13 +12,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import type {
-  Device,
-  FileEntry,
-  FileListing,
-  FilePreview,
-  TransferProgress,
-} from '../shared/types';
+import type { Device, FileEntry, FileListing, FilePreview, TransferTask } from '../shared/types';
 import { api, bytes, errorText, Modal } from './ui';
 import { localFilePath } from '../shared/preview';
 const remoteJoin = (dir: string, name: string) => `${dir === '/' ? '' : dir}/${name}`;
@@ -30,7 +24,7 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<TransferProgress | null>(null);
+  const [tasks, setTasks] = useState<TransferTask[]>([]);
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [edit, setEdit] = useState<{
     action: 'mkdir' | 'rename';
@@ -38,6 +32,10 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
     value: string;
   } | null>(null);
   const active = useRef(false);
+  const remotePathRef = useRef(remote.path);
+  const localPathRef = useRef(local.path);
+  remotePathRef.current = remote.path;
+  localPathRef.current = local.path;
   async function loadRemote(path: string) {
     const listing = await api.listRemote(device.id, path);
     setRemote(listing);
@@ -49,7 +47,6 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
     setBusy(true);
     setError('');
     setNotice('');
-    setProgress(null);
     try {
       await fn();
     } catch (e) {
@@ -57,7 +54,6 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
     } finally {
       active.current = false;
       setBusy(false);
-      setProgress(null);
     }
   }
   useEffect(() => {
@@ -69,13 +65,39 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
           errors.map((r) => errorText((r as PromiseRejectedResult).reason)).join('；'),
         );
     });
-    return api.onProgress(setProgress);
+    const unsubscribe = api.onTransfer((task) => {
+      if (task.deviceId !== device.id) return;
+      setTasks((previous) =>
+        previous.some((item) => item.id === task.id)
+          ? previous.map((item) => (item.id === task.id ? task : item))
+          : [...previous, task],
+      );
+      if (task.state === 'complete') {
+        void loadRemote(remotePathRef.current).catch(() => {});
+        void api
+          .listLocal(localPathRef.current || undefined)
+          .then(setLocal)
+          .catch(() => {});
+      }
+    });
+    void api
+      .transfers()
+      .then((items) =>
+        setTasks((previous) => [
+          ...items.filter(
+            (item) =>
+              item.deviceId === device.id && !previous.some((value) => value.id === item.id),
+          ),
+          ...previous,
+        ]),
+      )
+      .catch(() => {});
+    return unsubscribe;
   }, []);
-  async function upload(paths?: string[]) {
+  async function upload(paths?: string[], folders = false) {
     await run(async () => {
-      const count = await api.upload(device.id, remote.path, paths);
-      setNotice(`已上传 ${count} 个文件`);
-      await loadRemote(remote.path);
+      const queued = await api.upload(device.id, remote.path, paths, folders);
+      if (queued.length) setNotice(`${queued.length} 项已加入上传队列`);
     });
   }
   async function showPreview(file: FileEntry, side: 'local' | 'remote') {
@@ -146,7 +168,7 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
           </button>
         )}
         {side === 'local' ? (
-          !file.directory && (
+          !file.symlink && (
             <button
               title="上传"
               aria-label={`上传 ${file.name}`}
@@ -168,15 +190,15 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
                 <Eye size={15} />
               </button>
             )}
-            {!file.directory && (
+            {!file.symlink && (
               <button
                 title="下载"
+                aria-label={`下载 ${file.name}`}
                 disabled={busy}
                 onClick={() =>
                   void run(async () => {
                     if (await api.download(device.id, remoteJoin(remote.path, file.name))) {
-                      setNotice('下载完成');
-                      setLocal(await api.listLocal(local.path));
+                      setNotice('已加入下载队列');
                     }
                   })
                 }
@@ -218,7 +240,7 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
     <Modal
       wide
       title={`文件 · ${device.name}`}
-      subtitle="SFTP 安全传输 · 双击目录进入，也可以把本地文件拖到右侧上传。"
+      subtitle="SFTP · 双击进入目录，可拖入文件或目录上传。收起窗口不停止传输。"
       close={() => (preview ? setPreview(null) : !busy && close())}
     >
       <div className="file-panes">
@@ -282,6 +304,10 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
                 <ArrowUpFromLine size={15} />
                 上传
               </button>
+              <button disabled={busy} onClick={() => void upload(undefined, true)}>
+                <Folder size={15} />
+                上传目录
+              </button>
             </div>
           </div>
           <form
@@ -344,13 +370,62 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
       )}
       <div className="transfer-status">
         {busy && <LoaderCircle size={16} className="spin" />}
-        {progress
-          ? `${progress.name} · ${bytes(progress.transferred)} / ${bytes(progress.total)}`
-          : busy
-            ? '正在处理，请稍候…'
-            : notice || '连接使用 SSH 主机密钥验证 · 目录上传请先打包'}
-        {progress && <progress value={progress.transferred} max={progress.total || 1} />}
+        {busy
+          ? '正在处理，请稍候…'
+          : notice || '目录会递归传输；不跟随符号链接，不覆盖已存在的目标。'}
       </div>
+      {!!tasks.length && (
+        <div className="transfer-queue" aria-label="传输队列">
+          {tasks
+            .slice()
+            .reverse()
+            .map((task) => (
+              <div className="transfer-task" key={task.id}>
+                <span>
+                  {task.direction === 'upload' ? '↑' : '↓'} {task.name} ·{' '}
+                  {
+                    {
+                      queued: '排队中',
+                      running: '传输中',
+                      complete: '已完成',
+                      failed: '失败',
+                      cancelled: '已取消',
+                    }[task.state]
+                  }{' '}
+                  · {bytes(task.transferred)} / {bytes(task.total)} · {task.files} 个文件
+                </span>
+                <div className="task-actions">
+                  {['queued', 'running'].includes(task.state) && (
+                    <button
+                      onClick={() =>
+                        void api
+                          .cancelTransfer(task.id)
+                          .catch((failure) => setError(errorText(failure)))
+                      }
+                    >
+                      取消传输
+                    </button>
+                  )}
+                  {['failed', 'cancelled'].includes(task.state) && (
+                    <button
+                      onClick={() =>
+                        void api
+                          .retryTransfer(task.id)
+                          .catch((failure) => setError(errorText(failure)))
+                      }
+                    >
+                      重试传输
+                    </button>
+                  )}
+                </div>
+                {task.state === 'running' && (
+                  <progress value={task.transferred} max={task.total || 1} />
+                )}
+                {task.error && <p className="error">{task.error}</p>}
+              </div>
+            ))}
+        </div>
+      )}
       {error && (
         <p className="error" role="alert">
           {error}

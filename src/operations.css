@@ -1,0 +1,144 @@
+.terminal-toolbar,
+.session-tabs,
+.deployment-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.terminal-toolbar select {
+  max-width: 320px;
+}
+.session-tabs {
+  gap: 6px;
+}
+.session-tabs > div {
+  display: flex;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+}
+.session-tabs button {
+  background: transparent;
+  border: none;
+}
+.session-tabs .selected,
+.deployment-tools .selected {
+  background: #e0edff;
+  border-color: #5b87c6;
+  color: #234b85;
+}
+.terminal-screen {
+  height: 350px;
+  background: #111827;
+  border-radius: 8px;
+  padding: 12px;
+}
+.terminal-pane[hidden] {
+  display: none;
+}
+.session-status {
+  padding: 10px 0;
+  font-size: 15px;
+  color: #46566e;
+  overflow-wrap: anywhere;
+}
+.session-status.failed,
+.session-status.cancelled {
+  color: #9d3131;
+}
+.session-status.complete {
+  color: #21633e;
+}
+.deployment-plan {
+  margin-top: 16px;
+}
+.deployment-plan dl {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 15px;
+}
+.deployment-plan dt {
+  color: #536177;
+}
+.deployment-plan dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.installer-source {
+  max-height: 300px;
+  overflow: auto;
+  background: #111827;
+  color: #e5e7eb;
+  padding: 16px;
+  font-size: 12px;
+}
+.deployment-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 18px 0;
+  font-size: 15px;
+}
+.deployment-consent input {
+  width: 16px;
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.deployment-session {
+  margin-top: 22px;
+}
+.probe-install-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 16px 0;
+}
+.probe-install-fields label {
+  display: grid;
+  gap: 6px;
+  font-size: 15px;
+}
+.probe-install-fields p {
+  grid-column: 1 / -1;
+}
+.session-launcher {
+  position: fixed;
+  left: 24px;
+  bottom: 74px;
+  z-index: 20;
+  box-shadow: 0 4px 18px #26334d1a;
+}
+.transfer-queue {
+  margin-top: 12px;
+  max-height: 180px;
+  overflow: auto;
+  border-top: 1px solid #d4dce7;
+}
+.transfer-task {
+  padding: 10px 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  align-items: center;
+}
+.transfer-task > span {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.transfer-task progress,
+.transfer-task .error {
+  grid-column: 1 / -1;
+  margin: 0;
+  width: 100%;
+}
+.transfer-task .task-actions {
+  display: flex;
+  gap: 6px;
+}
+@media (max-height: 760px) {
+  .terminal-screen {
+    height: 260px;
+  }
+}

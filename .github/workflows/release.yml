@@ -38,6 +38,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: actions/download-artifact@v4
         with:
           name: Nexus-Windows
@@ -45,4 +49,13 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --title "Nexus $GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const section = readFileSync('CHANGELOG.md', 'utf8').split(`## ${version} `)[1];
+          if (!section) throw new Error('Missing changelog entry');
+          const notes = section.split('\n## ')[0].split('\n').slice(1).join('\n').trim();
+          writeFileSync('release-notes.md', notes + '\n\nWindows x64 便携版，未签名。升级前退出旧版，运行前核对 SHA256SUMS.txt。\n');
+          NODE
+          gh release create "$GITHUB_REF_NAME" release/*.exe release/SHA256SUMS.txt --title "Nexus ${GITHUB_REF_NAME#v}" --notes-file release-notes.md --verify-tag

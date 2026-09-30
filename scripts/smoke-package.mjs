@@ -17,6 +17,12 @@ assert(
   extractFile(archive, 'dist-electron/main.cjs').equals(await readFile('dist-electron/main.cjs')),
   'Packaged main process must match current build',
 );
+assert(
+  extractFile(archive, 'dist-electron/preload.cjs').equals(
+    await readFile('dist-electron/preload.cjs'),
+  ),
+  'Packaged preload must match current build',
+);
 for (const file of await readdir('dist', { recursive: true })) {
   const path = join('dist', file);
   if (!(await stat(path)).isFile()) continue;

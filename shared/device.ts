@@ -17,8 +17,7 @@ export function deviceProfile(device: Pick<Device, 'type' | 'os'>) {
     deployment: platform === 'linux',
     power: platform === 'linux',
     hint: {
-      linux:
-        'Linux：支持 SSH / SFTP、运行识别和安装引导。Alpine、非 systemd 系统会按可用工具降级。',
+      linux: 'Linux：支持 SSH / SFTP、运行识别和软件部署。安装入口会检查实际发行版、架构与权限。',
       windows:
         'Windows 也支持 SSH / SFTP，目标电脑需启用 OpenSSH Server。快捷操作使用 PowerShell，默认关闭电源操作。',
       macos:

@@ -1,49 +1,28 @@
-# 探针研究记录
+# ServerStatus 数据接口
 
-研究日期：2026-09-19。输入：`serverstatus-agent-private-linux-amd64-v1.8.1.zip`。
+Nexus 读取 ServerStatus-Rust 的 `/json/stats.json`，不运行探针客户端二进制，也不提供服务端。探针客户端向 `/report` 上报，两者使用不同接口与凭据。
 
-## 包内容及方向
+## 字段
 
-| 文件                          | 用途                                                  |
-| ----------------------------- | ----------------------------------------------------- |
-| `bin/stat_client-linux-amd64` | ServerStatus-Rust 1.8.1 静态链接 Linux x86_64 客户端  |
-| `install.sh`                  | 校验二进制、交互配置、安装 systemd unit               |
-| `systemd/stat_client.service` | 通过受限权限的环境文件提供认证参数                    |
-| `defaults.private.env`        | 私有默认配置，含上报凭据，不进入 Nexus 源码或发布产物 |
-| `status.sh` / `uninstall.sh`  | 诊断与卸载，卸载前归档配置与节点 ID                   |
+| Nexus    | ServerStatus 字段与处理                                    |
+| -------- | ---------------------------------------------------------- |
+| 绑定 ID  | `name`；分组模式使用客户端持久化的系统 ID                  |
+| 展示名称 | `alias`，缺省使用 `name`                                   |
+| 在线     | `online4` 或 `online6`，并检查 `updated` 与 `latest_ts`    |
+| CPU      | `cpu`，百分比                                              |
+| 内存     | `memory_used / memory_total`，计数乘 1024 转字节           |
+| 磁盘     | `hdd_used / hdd_total`；默认乘 1024²，`si=true` 时乘 1000² |
+| 系统     | 从 `labels` 解析 `os=...`，不当作完整发行版信息            |
+| 运行时间 | 服务端的 `uptime`                                          |
+| 网络     | `network_rx`、`network_tx`，字节每秒                       |
+| 延迟     | `time_10010`，探针至联通探测点的延迟，不是桌面至服务器延迟 |
 
-本机为 Windows，未执行 Linux 二进制或部署脚本，也未修改任何服务器。只读取公开状态 JSON 和对应版本的上游源码。
+公共 JSON 不提供 SSH 登录信息，需要在设备中单独填写。缺失计数显示未知，不作为 0 处理。接口 Bearer Token 与探针分组密码分开保存。
 
-客户端上报地址与桌面读取地址属于不同接口。Nexus 无需运行该 Linux 二进制，只负责把现有监控数据绑定到自己的设备模型。
+## 读取策略
 
-## 接口与字段
+默认每 10 秒轮询，可设置为 5–300 秒。请求超时 12 秒，最大响应 5 MB，不跟随重定向。默认过期阈值 90 秒，可调整为 30–3600 秒。
 
-已实际读取部署包说明中的 `https://server.yrrlyb.top/json/stats.json`，获得 `updated` 与 `servers` 数组，首次读取有 6 个节点。节点数随服务端变化，不在产品中固定。
+接口异常时保留设备配置，但清空当前监控快照，避免显示旧数据为实时数据。单个节点过期则标记离线。重启跟踪必须观察到离线后重新上线才确认完成。
 
-参考上游固定版本：
-
-- <https://github.com/zdz/ServerStatus-Rust/blob/v1.8.1/server/src/payload.rs>
-- <https://github.com/zdz/ServerStatus-Rust/blob/v1.8.1/server/src/stats.rs>
-- <https://github.com/zdz/ServerStatus-Rust/blob/v1.8.1/client/src/sys_info.rs>
-
-| Nexus       | ServerStatus 字段 / 处理                                                  |
-| ----------- | ------------------------------------------------------------------------- |
-| 稳定绑定 ID | `name`；分组模式中对应客户端持久化的系统 ID                               |
-| 名称        | `alias`，缺省用 `name`                                                    |
-| 在线        | `(online4 === true                                                        |     | online6 === true)`，同时检查 `updated`和`latest_ts` |
-| CPU         | `cpu`，百分比                                                             |
-| 内存占用    | `memory_used / memory_total * 100`，计数乘 1024 转字节                    |
-| 磁盘占用    | `hdd_used / hdd_total * 100`，默认计数乘 1024² 转字节；`si=true` 用 1000² |
-| 系统类别    | 从 `labels` 解析 `os=...`；不是完整发行版版本                             |
-| 运行时间    | `uptime` 已是服务端格式化字符串                                           |
-| 网络速率    | `network_rx` / `network_tx`，字节每秒                                     |
-| 延迟        | `time_10010`，探针至中国联通探测点的延迟，不是本机到服务器延迟            |
-| SSH IP      | 不在该公共 JSON 中暴露，必须自行填写                                      |
-
-上游 `ip_info` 和 `sys_info` 标为 `skip_serializing`。不能把布尔字段 `si` 误当成系统信息对象。缺失计数显示 `—`，不伪造为 0。
-
-## 连接失败策略
-
-主进程每 10 秒轮询（可配置 5–300 秒）。请求超时 12 秒，最大响应 5 MB，不跟随重定向。默认 90 秒过期阈值，可调整至 30–3600 秒。接口整体过期视为读取失败；单个节点过期则视为离线。接口异常时清空当前监控快照，保留设备配置，避免旧值冒充实时数据。
-
-接口 Bearer Token 如需配置则加密保存，与探针客户端分组密码完全分开。普通公开 ServerStatus JSON 无需 Token。
+字段处理参考固定版本 v1.8.1 的 [payload](https://github.com/zdz/ServerStatus-Rust/blob/v1.8.1/server/src/payload.rs)、[stats](https://github.com/zdz/ServerStatus-Rust/blob/v1.8.1/server/src/stats.rs) 与 [客户端](https://github.com/zdz/ServerStatus-Rust/blob/v1.8.1/client/src/sys_info.rs)。

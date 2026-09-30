@@ -1,29 +1,34 @@
-# Windows / macOS / NAS 的 SSH 连接
+# SSH 连接
 
-## Windows 当然可以使用 SSH
+## 使用 Nexus 内置终端
 
-先区分两种角色：
+添加设备并保存 SSH 地址、端口、用户名和认证信息，点击「SSH 连接」。内置终端和 SFTP 使用 ssh2，不需要本机 `ssh.exe`。
 
-| 场景                                    | 在哪台电脑配置    | 需要什么                                                   |
-| --------------------------------------- | ----------------- | ---------------------------------------------------------- |
-| Windows 连接 Linux / NAS / 其他 Windows | 运行 Nexus 的电脑 | OpenSSH **Client**                                         |
-| 其他电脑连接一台 Windows                | 被连接的 Windows  | OpenSSH **Server** 和 sshd 服务                            |
-| Nexus 内置文件管理 / 快捷操作           | 运行 Nexus 的电脑 | 无需系统 ssh.exe，使用内置 ssh2；目标机仍需提供 SSH / SFTP |
+- 密码和私钥从本机加密存储读取；私钥文件在保存设备时导入。
+- Windows SSH Agent 使用 OpenSSH 的命名管道，选择此认证方式前请启动 `ssh-agent` 并用 `ssh-add` 加入密钥。
+- 首次连接需要核对 SHA-256 主机指纹，信任记录保存在 Nexus 数据库中。密钥变化时拒绝连接，先从控制台核实服务器身份。
+- 终端支持多会话。收起窗口不关闭连接，关闭标签结束会话，断线后可点击「重新连接」。重新连接建立新会话，不会恢复已经结束的远程 shell。
+- Esc、Tab 和 Ctrl+C 在终端中发送到远端。终端窗口的关闭按钮只收起窗口。
+- 终端输出保存在内存，恢复窗口显示最近约 1 MB 内容，退出应用后清除。
 
-Windows 10/11 可以通过可选功能安装 OpenSSH。Nexus 的「探针与连接」会检测本机 `ssh -V`，并给出启用命令。仅 SSH **终端**需要本机客户端；内置 SFTP 不依赖它。
+## Windows 能使用 SSH 吗？
 
-本机缺少客户端时，以管理员身份打开 PowerShell：
+可以。需要区分客户端和服务端：
+
+| 场景                                    | 需要什么                                    |
+| --------------------------------------- | ------------------------------------------- |
+| 在 Windows 上使用 Nexus 内置终端和 SFTP | 不需要安装本机 OpenSSH Client               |
+| 在 PowerShell 中使用 `ssh` 命令         | 本机 OpenSSH Client                         |
+| 让 Nexus 连接一台 Windows 电脑          | 目标 Windows 的 OpenSSH Server 和 sshd 服务 |
+
+本机要使用 PowerShell 的 `ssh` 命令，可在管理员 PowerShell 中安装客户端：
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
 ssh -V
 ```
 
-重开 Nexus 后点「SSH 连接」。认证在独立终端里交互完成，密码不会拼进命令行。`SSH Agent` 使用 Windows OpenSSH 的命名管道；选择此方式前，应自行启动 `ssh-agent` 并用 `ssh-add` 加入私钥。
-
-## 连接一台 Windows 电脑
-
-在**目标电脑**的管理员 PowerShell 中运行：
+连接 Windows 目标电脑时，在目标机的管理员 PowerShell 中执行：
 
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
@@ -32,26 +37,24 @@ Set-Service -Name sshd -StartupType Automatic
 Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue
 ```
 
-检查防火墙和网络是否允许你访问 TCP 22。不要为了连接关闭整个防火墙。企业策略和组件源可能影响可选功能安装，以系统安装结果为准。
+确认防火墙和网络允许访问 TCP 22，不要关闭整个防火墙。企业策略和组件源可能影响安装，以系统实际结果为准。
 
-在 Nexus 中选择 `Windows PC`，填实际地址、端口、用户名、认证信息。Windows Hello PIN **不是** SSH 登录密码。域账户和 Microsoft 账户可能需要服务端账户策略及特定用户名格式；先用系统 SSH 验证，再填入 Nexus。
+Nexus 中选择 Windows PC，填写实际用户名。Windows Hello PIN 不是 SSH 密码；域账户和 Microsoft 账户需遵守服务端账户策略。用户名支持域和邮箱格式。
 
-Windows 快捷命令通过 `powershell.exe -NoProfile -NonInteractive -EncodedCommand` 执行，读取 `Get-Service`、`Get-WinEvent`、`Get-CimInstance`。不会向 Windows 发送 `systemctl`、`journalctl`、`shutdown -h`。查看日志可能需要服务端授权。Windows 电源操作和 Linux 运行识别默认不提供。
+Windows 快捷操作使用 PowerShell 读取服务、日志和系统信息，不发送 Linux 的 systemctl、journalctl 或关机命令。SFTP 路径以目标返回为准，例如 `/C:/Users/yourname`，不要按本机路径规则猜测。
 
-SFTP 路径以服务器返回的路径为准，例如 `/C:/Users/yourname`；不要用本机 Windows 路径规则猜测远程路径。Nexus 默认从远程用户目录 `.` 开始浏览。
+## macOS 和 NAS
 
-## macOS 与 NAS
+- macOS：在「系统设置 → 通用 → 共享」中启用远程登录，使用允许登录的账户。快捷操作使用 launchctl、系统日志和 sw_vers。
+- Linux：服务操作按 systemd、OpenRC 和 service 适配；工具不存在或权限不足时显示错误，不自动提权。
+- NAS：在厂商管理界面启用 SSH / SFTP。实际系统未知时不执行 Linux 专用命令；通用安装脚本不适用于所有专有 NAS。
 
-- **macOS**：系统设置 → 通用 → 共享 → 远程登录。使用允许远程登录的账户；快捷服务列表使用 `launchctl list`，系统版本使用 `sw_vers`，日志使用系统 `log`。
-- **Linux / Alpine**：服务列表优先 systemd，没有 systemd 时尝试 OpenRC / `service`；日志优先 journalctl，再尝试 logread 或可读日志文件。工具缺失和权限问题会显示错误，不自动提权。
-- **NAS**：先在设备管理界面启用 SSH / SFTP。NAS 默认不提供电源操作；实际系统未知时，仅允许保守的系统信息命令。填写 Debian / Linux 等真实系统后才启用 Linux 识别与安装引导。专有 NAS 不应直接运行通用 Docker / 探针脚本，应使用厂商的应用或容器管理器。
+## 故障排查
 
-## 主机密钥与故障排查
+1. 核对地址、端口和网络。PowerShell 的 `Test-NetConnection example.com -Port 22` 只检查 TCP 连通，不验证身份。
+2. 核对主机指纹。外部 OpenSSH 的 known_hosts 与 Nexus 信任记录相互独立。
+3. SSH 能连接、SFTP 不能连接时，检查目标的 SFTP 子系统和账户限制。软件部署也需要 SFTP 上传脚本。
+4. 内置认证不自动处理登录后的多因素挑战；使用专用密钥或服务端允许的密码认证。
+5. 只读快捷操作不会自动 sudo。软件部署的 sudo 提示由安装终端处理。
 
-1. 确认地址、端口和网络可达；`Test-NetConnection example.com -Port 22` 只验证 TCP，不验证身份。
-2. 核对 SSH 主机指纹。系统终端使用系统 `known_hosts`，内置功能使用 Nexus 独立信任库，两条路径可能各提示一次。
-3. 主机密钥变化时先通过云控制台 / 管理面板核实，不能盲目忽略验证。
-4. 「SSH 能连接、SFTP 不行」通常是目标机未启用 SFTP 子系统或账户被限制。
-5. Linux 快捷操作要求免交互认证；Nexus 不处理交互式 sudo，不替你开放 root 登录。
-
-官方参考：[Microsoft OpenSSH 安装说明](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)、[Apple 远程登录说明](https://support.apple.com/guide/mac-help/allow-a-remote-computer-to-access-your-mac-mchlp1066/mac)。
+参考：[Microsoft OpenSSH](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)、[macOS 远程登录](https://support.apple.com/guide/mac-help/allow-a-remote-computer-to-access-your-mac-mchlp1066/mac)。

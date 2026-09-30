@@ -7,24 +7,34 @@ export async function connectSSH(
   device: Device,
   credential: Credential,
   verify: VerifyHost,
+  signal?: AbortSignal,
 ): Promise<Client> {
   if (!device.connection.host) throw new Error('请先编辑设备，填写 SSH 地址');
   const client = new Client();
   return new Promise((resolve, reject) => {
+    const abort = () => {
+      client.destroy();
+      reject(new Error('SSH 连接已取消'));
+    };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => {
       client.destroy();
       reject(new Error('SSH 连接超时'));
     }, 60_000);
     client.once('ready', () => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       resolve(client);
     });
     client.on('error', (error) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       reject(error);
     });
     client.once('close', () => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       reject(new Error('SSH 连接已关闭'));
     });
     const c = device.connection;

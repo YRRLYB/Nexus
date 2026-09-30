@@ -14,6 +14,8 @@ Nexus 是读取现有状态站的客户端，**不包含状态站服务端，也
 
 ## 方式一：公开自动脚本
 
+在 Nexus 内也可以安装：设备详情 → 部署软件 → ServerStatus 探针。填写 HTTPS 上报地址、组 ID、节点名称和地区代码，检查环境和脚本后确认安装，组密码在终端提示中隐藏输入。已有安装不会被覆盖。下面的脚本方式适用于直接在终端操作的情况。
+
 支持 Linux **x86_64 / aarch64 / armv7l** 和 systemd。需要 `curl`、`unzip`、`sha256sum`。Ubuntu / Debian 可先执行 `sudo apt-get update && sudo apt-get install -y curl unzip ca-certificates`。
 
 ```sh

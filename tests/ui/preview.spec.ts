@@ -73,10 +73,12 @@ test('Windows guidance, device policies and real SFTP image/text preview', async
     await page.getByTitle('编辑连接').click();
     await page.getByLabel('设备类型').selectOption('linux-vps');
     await page.getByRole('button', { name: '保存设备' }).click();
-    await page.getByRole('button', { name: '复制探针安装命令' }).click();
-    const copied = await app.evaluate(({ clipboard }) => clipboard.readText());
-    expect(copied).toContain('scripts/probe/install.sh');
-    expect(copied).not.toContain('preview-fixture-pass');
+    await page.getByRole('button', { name: '部署软件', exact: true }).click();
+    const deployment = page.getByRole('dialog', { name: '部署软件 · Preview Windows' });
+    await expect(deployment.getByRole('button', { name: '宝塔面板', exact: true })).toBeVisible();
+    await expect(
+      deployment.getByRole('button', { name: 'ServerStatus 探针', exact: true }),
+    ).toBeVisible();
     expect(errors).toEqual([]);
   } finally {
     await app.close();

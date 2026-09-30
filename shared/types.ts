@@ -79,6 +79,62 @@ export interface TransferProgress {
   transferred: number;
   total: number;
 }
+export type InstallTool = 'docker' | 'baota' | 'probe';
+export interface DeploymentCheck {
+  system: string;
+  distribution: string;
+  version: string;
+  architecture: string;
+  user: string;
+  root: boolean;
+  sudo: boolean;
+  systemd: boolean;
+  installed: boolean;
+  blockers: string[];
+}
+export interface DeploymentPlan {
+  id: string;
+  deviceId: string;
+  tool: InstallTool;
+  source: string;
+  sha256: string;
+  script: string;
+  check: DeploymentCheck;
+  expiresAt: number;
+}
+export interface ProbeInstallOptions {
+  server: string;
+  group: string;
+  alias: string;
+  location: string;
+}
+export interface SessionInfo {
+  id: string;
+  deviceId: string;
+  title: string;
+  kind: 'shell' | 'deployment';
+  tool?: InstallTool;
+  state: 'running' | 'verifying' | 'complete' | 'failed' | 'cancelled' | 'closed';
+  message?: string;
+  exitCode?: number;
+}
+export interface SessionOutput {
+  id: string;
+  sequence: number;
+  data: string;
+  bytes: number;
+}
+export interface TransferTask {
+  id: string;
+  deviceId: string;
+  direction: 'upload' | 'download';
+  name: string;
+  state: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
+  transferred: number;
+  total: number;
+  files: number;
+  error?: string;
+}
 export type QuickAction = 'docker' | 'services' | 'logs' | 'sysinfo';
 export type FilePreview = {
   path: string;
@@ -170,6 +226,18 @@ export interface NexusAPI {
   openSSH(id: string): Promise<void>;
   sshStatus(): Promise<SSHStatus>;
   copyInstallCommand(id: string, tool: 'docker' | 'probe'): Promise<void>;
+  prepareDeployment(id: string, tool: InstallTool): Promise<DeploymentPlan>;
+  startDeployment(planId: string, options?: ProbeInstallOptions): Promise<SessionInfo | null>;
+  openTerminal(id: string): Promise<SessionInfo>;
+  sessions(): Promise<SessionInfo[]>;
+  attachSession(id: string): Promise<SessionOutput>;
+  detachSession(id: string): Promise<void>;
+  writeSession(id: string, data: string): Promise<void>;
+  resizeSession(id: string, cols: number, rows: number): Promise<void>;
+  acknowledgeSession(id: string, bytes: number): Promise<void>;
+  closeSession(id: string): Promise<void>;
+  onSessionOutput(callback: (output: SessionOutput) => void): () => void;
+  onSessionState(callback: (session: SessionInfo) => void): () => void;
   power(id: string, action: PowerAction): Promise<boolean>;
   powerStates(): Promise<Record<string, PowerState>>;
   quickAction(id: string, action: QuickAction): Promise<string>;
@@ -179,8 +247,17 @@ export interface NexusAPI {
   previewRemote(id: string, path: string): Promise<FilePreview>;
   previewLocal(path: string): Promise<FilePreview>;
   pickLocalFolder(): Promise<string | null>;
-  upload(id: string, remoteDir: string, paths?: string[]): Promise<number>;
-  download(id: string, path: string): Promise<boolean>;
+  upload(
+    id: string,
+    remoteDir: string,
+    paths?: string[],
+    folders?: boolean,
+  ): Promise<TransferTask[]>;
+  download(id: string, path: string): Promise<TransferTask | null>;
+  transfers(): Promise<TransferTask[]>;
+  cancelTransfer(id: string): Promise<void>;
+  retryTransfer(id: string): Promise<void>;
+  onTransfer(callback: (task: TransferTask) => void): () => void;
   mutateRemote(
     id: string,
     action: 'mkdir' | 'rename' | 'delete',
