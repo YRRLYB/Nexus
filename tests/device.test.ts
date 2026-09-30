@@ -22,6 +22,10 @@ test('quick commands follow the remote OS and Linux service managers fall back s
     assert.doesNotMatch(decoded, /systemctl|journalctl|\/etc\/os-release/);
   }
   assert.equal(quickCommand({ type: 'macos', os: '' }, 'services'), 'launchctl list');
+  assert.equal(
+    quickCommand({ type: 'macos', os: '' }, 'logs'),
+    '/usr/bin/log show --last 1m --style compact',
+  );
   assert.match(quickCommand({ type: 'linux-vps', os: 'Alpine' }, 'services'), /rc-status/);
   assert.match(quickCommand({ type: 'linux-vps', os: '' }, 'logs'), /logread/);
   assert.throws(() => quickCommand({ type: 'nas', os: '' }, 'services'), /实际系统/);

@@ -19,7 +19,7 @@ export function quickCommand(device: Pick<Device, 'type' | 'os'>, action: QuickA
     return {
       docker: 'docker ps -a --no-trunc',
       services: 'launchctl list',
-      logs: '/usr/bin/log show --last 5m --style compact 2>/dev/null | tail -n 100',
+      logs: '/usr/bin/log show --last 1m --style compact',
       sysinfo: 'printf "macOS "; sw_vers -productVersion',
     }[action];
   if (platform === 'unknown') {
@@ -31,7 +31,7 @@ export function quickCommand(device: Pick<Device, 'type' | 'os'>, action: QuickA
       'command -v docker >/dev/null || { echo "Docker 未安装或不在 PATH 中" >&2; exit 1; }; docker ps -a --no-trunc',
     services:
       'if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then systemctl --no-pager --type=service --state=running; elif command -v rc-status >/dev/null; then rc-status; elif command -v service >/dev/null; then service --status-all; else echo "没有可用的服务管理工具" >&2; exit 1; fi',
-    logs: 'if command -v journalctl >/dev/null && [ -d /run/systemd/system ]; then journalctl --no-pager -n 100; elif command -v logread >/dev/null; then logread | tail -n 100; elif [ -r /var/log/messages ]; then tail -n 100 /var/log/messages; else echo "系统日志不可读，请检查权限" >&2; exit 1; fi',
+    logs: 'if command -v journalctl >/dev/null && [ -d /run/systemd/system ]; then journalctl --no-pager -n 100; elif command -v logread >/dev/null; then logread; elif [ -r /var/log/messages ]; then tail -n 100 /var/log/messages; else echo "系统日志不可读，请检查权限" >&2; exit 1; fi',
     sysinfo:
       'if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s" "$PRETTY_NAME"; else uname -srm; fi',
   }[action];

@@ -62,9 +62,9 @@ Electron 下载不畅时，可以在当前 PowerShell 会话设置 `ELECTRON_MIR
 - 预览只读，不写临时下载文件、不发送内容给第三方、不执行 HTML / SVG / Markdown / JavaScript。SVG 作为纯文本查看；二进制与非 UTF-8 文本请下载后处理。
 - 大图、视频、PDF、远程编辑和实时 tail 日志暂不支持。终端本身不渲染图片，预览发生在 Nexus 的文件面板。
 
-## Docker 与同款探针安装
-
 ![通过 SSH / SFTP 预览服务器上的图片](docs/screenshots/preview.png)
+
+## Docker 与同款探针安装
 
 Linux 设备详情提供「复制 Docker 安装命令」与「复制探针安装命令」。脚本会请求确认，不在后台偷偷执行；无 `curl | sh` 的盲执行流程。Docker 已安装时不会覆盖 / 升级；探针固定 v1.8.1，支持 x86_64 / ARM64 / ARMv7，校验 ZIP 后安装受限 systemd 服务，保留节点身份。
 
