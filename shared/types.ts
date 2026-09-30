@@ -1,0 +1,192 @@
+export type DeviceType = 'linux-server' | 'linux-vps' | 'windows' | 'macos' | 'nas';
+export type Capability = 'ssh' | 'sftp' | 'restart' | 'shutdown';
+export interface Device {
+  id: string;
+  name: string;
+  type: DeviceType;
+  icon: string;
+  tags: string[];
+  notes: string;
+  os: string;
+  location?: string;
+  position: { x: number; y: number };
+  connection: {
+    host: string;
+    port: number;
+    username: string;
+    auth: 'password' | 'key' | 'agent';
+    keyPath: string;
+  };
+  probe: { enabled: boolean; deviceId: string };
+  capabilities: Record<Capability, boolean>;
+  hasCredential?: boolean;
+}
+export interface Credential {
+  password?: string;
+  passphrase?: string;
+  privateKey?: string;
+}
+export interface DeviceInput {
+  device: Device;
+  credential?: Credential;
+  clearCredential?: boolean;
+}
+export interface Settings {
+  probeUrl: string;
+  pollSeconds: number;
+  staleSeconds: number;
+  hasToken?: boolean;
+}
+export interface ProbeNode {
+  id: string;
+  name: string;
+  location: string;
+  online: boolean;
+  stale: boolean;
+  cpu: number | null;
+  memory: number | null;
+  disk: number | null;
+  memoryUsed: number | null;
+  memoryTotal: number | null;
+  diskUsed: number | null;
+  diskTotal: number | null;
+  os: string;
+  uptime: string;
+  rx: number | null;
+  tx: number | null;
+  lastSeen: number;
+  latency: number | null;
+}
+export interface ProbeSnapshot {
+  nodes: ProbeNode[];
+  fetchedAt: number;
+  error?: string;
+}
+export interface FileEntry {
+  name: string;
+  directory: boolean;
+  symlink: boolean;
+  size: number;
+  mode: string;
+  modified: number;
+}
+export interface FileListing {
+  path: string;
+  entries: FileEntry[];
+}
+export interface TransferProgress {
+  name: string;
+  transferred: number;
+  total: number;
+}
+export type QuickAction = 'docker' | 'services' | 'logs' | 'sysinfo';
+export type FilePreview = {
+  path: string;
+  size: number;
+  truncated: boolean;
+} & ({ kind: 'image'; mime: string; data: string } | { kind: 'text'; text: string });
+export interface SSHStatus {
+  available: boolean;
+  version: string;
+  platform: string;
+}
+export type PowerAction = 'restart' | 'shutdown';
+export interface PowerState {
+  action: PowerAction;
+  phase: 'waiting-offline' | 'waiting-online' | 'complete' | 'timeout';
+  startedAt: number;
+}
+export interface Bootstrap {
+  devices: Device[];
+  settings: Settings;
+  vaultAvailable: boolean;
+  dataPath: string;
+  version: string;
+}
+export type DiscoverySource = 'processes' | 'services' | 'containers' | 'ports' | 'timers' | 'cron';
+export interface RunningProcess {
+  pid: number;
+  parentPid: number;
+  cpu: number;
+  memory: number;
+  name: string;
+  directory: string;
+  executable: string;
+}
+export interface RunningService {
+  name: string;
+  description: string;
+}
+export interface RunningContainer {
+  name: string;
+  image: string;
+  state: string;
+  ports: string;
+  project: string;
+}
+export interface ListeningPort {
+  protocol: string;
+  address: string;
+  pids: number[];
+}
+export interface DiscoveredProject {
+  name: string;
+  kind: string;
+  evidence: string;
+  confidence: 'confirmed' | 'candidate';
+  directory?: string;
+  ports?: string;
+}
+export interface DiscoveryReport {
+  scannedAt: number;
+  sources: {
+    source: DiscoverySource;
+    status: 'ok' | 'limited' | 'unavailable';
+    message?: string;
+  }[];
+  projects: DiscoveredProject[];
+  processes: RunningProcess[];
+  services: RunningService[];
+  containers: RunningContainer[];
+  ports: ListeningPort[];
+  timers: string[];
+  cron: string[];
+}
+export interface NexusAPI {
+  discover(id: string, refresh?: boolean): Promise<DiscoveryReport>;
+  windowState(): Promise<{ fullScreen: boolean }>;
+  setFullScreen(value: boolean): Promise<void>;
+  onWindowState(callback: (state: { fullScreen: boolean }) => void): () => void;
+  bootstrap(): Promise<Bootstrap>;
+  saveDevice(input: DeviceInput): Promise<Device>;
+  deleteDevice(id: string): Promise<boolean>;
+  moveDevice(id: string, position: Device['position']): Promise<void>;
+  saveSettings(settings: Settings, token?: string): Promise<Settings>;
+  pollProbe(): Promise<ProbeSnapshot>;
+  copy(
+    id: string,
+    field: 'host' | 'port' | 'username' | 'password' | 'ssh' | 'info',
+  ): Promise<void>;
+  openSSH(id: string): Promise<void>;
+  sshStatus(): Promise<SSHStatus>;
+  copyInstallCommand(id: string, tool: 'docker' | 'probe'): Promise<void>;
+  power(id: string, action: PowerAction): Promise<boolean>;
+  powerStates(): Promise<Record<string, PowerState>>;
+  quickAction(id: string, action: QuickAction): Promise<string>;
+  pickKey(): Promise<string | null>;
+  listRemote(id: string, path: string): Promise<FileListing>;
+  listLocal(path?: string): Promise<FileListing>;
+  previewRemote(id: string, path: string): Promise<FilePreview>;
+  previewLocal(path: string): Promise<FilePreview>;
+  pickLocalFolder(): Promise<string | null>;
+  upload(id: string, remoteDir: string, paths?: string[]): Promise<number>;
+  download(id: string, path: string): Promise<boolean>;
+  mutateRemote(
+    id: string,
+    action: 'mkdir' | 'rename' | 'delete',
+    path: string,
+    target?: string,
+  ): Promise<boolean>;
+  onProgress(callback: (progress: TransferProgress) => void): () => void;
+  droppedPaths(files: File[]): string[];
+}

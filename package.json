@@ -1,0 +1,74 @@
+{
+  "name": "nexus-workspace",
+  "productName": "Nexus",
+  "version": "0.4.0",
+  "description": "A visual desktop workspace for SSH, SFTP and monitoring across your personal servers and devices",
+  "author": "YRRLYB",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YRRLYB/Nexus.git"
+  },
+  "private": true,
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build && node scripts/build.mjs",
+    "start": "electron .",
+    "test": "tsx --test tests/*.test.ts",
+    "test:ui": "npm run build && playwright test",
+    "test:package": "node scripts/smoke-package.mjs",
+    "package": "npm run build && electron-builder --win portable --x64",
+    "check": "tsc --noEmit",
+    "format:check": "prettier --check src electron shared scripts tests docs *.json *.ts README.md CHANGELOG.md",
+    "format": "prettier --write src electron shared scripts tests docs *.json *.ts README.md CHANGELOG.md"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sql.js": "^1.13.0",
+    "ssh2": "^1.17.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@electron/asar": "^4.3.0",
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/sql.js": "^1.4.9",
+    "@types/ssh2": "^1.15.5",
+    "@vitejs/plugin-react": "^4.5.0",
+    "electron": "^41.0.0",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.0",
+    "prettier": "^3.9.8",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.3.0"
+  },
+  "build": {
+    "appId": "top.nexus.workspace",
+    "productName": "Nexus",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "src/assets/flags/LICENSE.txt",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "node_modules/ssh2/lib/protocol/crypto/build/**/*"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": "portable",
+      "signExecutable": false,
+      "artifactName": "Nexus-${version}-Windows-x64.${ext}"
+    }
+  }
+}

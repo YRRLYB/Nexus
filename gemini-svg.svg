@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="240" height="240">
+  <!-- 极简背景留白 -->
+  <rect width="120" height="120" fill="transparent" />
+
+  <g transform="translate(25, 25)">
+    <!-- 核心连接线，构成字母 N 的极简骨架 -->
+    <path
+      d="M 10,60 L 10,10 L 60,60 L 60,10"
+      fill="none"
+      stroke="#1C1C1E"
+      stroke-width="12"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <!-- 左下节点：代表基础设备 -->
+    <circle cx="10" cy="60" r="6" fill="#1C1C1E" />
+
+    <!-- 左上节点：代表连接设备 -->
+    <circle cx="10" cy="10" r="6" fill="#1C1C1E" />
+
+    <!-- 右下节点：代表管理终端 -->
+    <circle cx="60" cy="60" r="6" fill="#1C1C1E" />
+
+    <!-- 右上节点：代表当前被管理的 Online 设备 -->
+    <!-- 这里的绿色呼应方案中的“● Online”状态色 -->
+    <circle cx="60" cy="10" r="8" fill="#10B981" />
+  </g>
+</svg>
