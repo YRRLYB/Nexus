@@ -10,6 +10,45 @@
 .terminal-toolbar select {
   max-width: 320px;
 }
+.terminal-actions,
+.terminal-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.terminal-search {
+  margin: 0 0 0 auto;
+}
+.terminal-search input {
+  width: 190px;
+}
+.terminal-search span {
+  font-size: 13px;
+}
+.terminal-context-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+}
+.terminal-context-menu {
+  position: absolute;
+  display: grid;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  box-shadow: 0 6px 22px #11182733;
+}
+.terminal-context-menu button {
+  text-align: left;
+  border: none;
+}
+.file-filter {
+  width: calc(100% - 20px);
+  margin: 0 10px 8px;
+}
 .session-tabs {
   gap: 6px;
 }

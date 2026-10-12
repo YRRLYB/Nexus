@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { connectSSH, executeSSH, withSFTP, listSFTP } from '../electron/ssh';
 import { previewSFTP } from '../electron/preview';
 import { TEXT_PREVIEW_BYTES } from '../shared/preview';
-import type { Device } from '../shared/types';
+import type { Device, TransferConflict, ConflictDecision } from '../shared/types';
 import { Sessions } from '../electron/sessions';
 import { Transfers } from '../electron/transfers';
 import { Deployments, PREFLIGHT_COMMAND } from '../electron/deployment';
@@ -78,7 +78,7 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
             installedScripts.push(
               fs.readFileSync(join(root, 'tmp', installer, 'installer.sh'), 'utf8'),
             );
-            assert.match(info.command, /docker version/);
+            assert.match(info.command, /docker version|x-ui.service/);
             stream.write('fixture installation\n');
             stream.exit(installExit);
           } else if (info.command === 'success') {
@@ -282,12 +282,22 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
     () => {},
   );
   let cancelOnce = false;
-  const transfers = new Transfers(connect, (task) => {
-    if (cancelOnce && task.name === 'cancel.bin' && task.transferred > 0) {
-      cancelOnce = false;
-      transfers.cancel(task.id);
-    }
-  });
+  let conflictHandler:
+    ((conflict: TransferConflict, signal: AbortSignal) => Promise<ConflictDecision>) | undefined;
+  const transfers = new Transfers(
+    connect,
+    (task) => {
+      if (cancelOnce && task.name === 'cancel.bin' && task.transferred > 0) {
+        cancelOnce = false;
+        transfers.cancel(task.id);
+      }
+    },
+    () => '',
+    async (conflict, signal) => {
+      if (!conflictHandler) throw new Error('目标已存在，不覆盖');
+      return conflictHandler(conflict, signal);
+    },
+  );
   try {
     await assert.rejects(
       connectSSH(device, { password: 'fixture-pass' }, async () => false),
@@ -381,6 +391,10 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
     changedEnvironment = true;
     await assert.rejects(deployments.start(changed.id), /环境已变化/);
     changedEnvironment = false;
+    installExit = 0;
+    const panelPlan = await deployments.prepare(device.id, '3x-ui');
+    const panel = await deployments.start(panelPlan.id);
+    await waitFor(() => sessions.list().find((item) => item.id === panel.id)?.state === 'complete');
 
     fs.mkdirSync(join(downloads, 'tree', 'nested'), { recursive: true });
     fs.mkdirSync(join(downloads, 'tree', 'empty'));
@@ -451,6 +465,94 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
       () => transfers.list().find((item) => item.id === hidden.id)?.state === 'complete',
     );
     assert.equal(await readFile(join(downloads, 'received', '.hidden'), 'utf8'), 'hidden file');
+    const finishTransfer = async (task: { id: string }) => {
+      await waitFor(() =>
+        ['complete', 'failed'].includes(
+          transfers.list().find((item) => item.id === task.id)!.state,
+        ),
+      );
+      const result = transfers.list().find((item) => item.id === task.id)!;
+      assert.equal(result.state, 'complete', result.error);
+      return result;
+    };
+    for (const direction of ['upload', 'download'] as const) {
+      const source = direction === 'upload' ? join(downloads, 'same.txt') : '/same.txt';
+      const destination = direction === 'upload' ? '/' : join(downloads, 'received');
+      const original =
+        direction === 'upload' ? join(root, 'same.txt') : join(downloads, 'received', 'same.txt');
+      await writeFile(direction === 'upload' ? source : join(root, 'same.txt'), 'new payload');
+      await writeFile(original, 'old');
+      conflictHandler = async () => ({ choice: 'skip' });
+      const skipped = await finishTransfer(
+        transfers.enqueue(device.id, direction, source, destination),
+      );
+      assert.equal(skipped.skipped, 1);
+      assert.equal(skipped.transferred, 0);
+      assert.equal(await readFile(original, 'utf8'), 'old');
+      conflictHandler = async () => ({ choice: 'keep-both' });
+      await finishTransfer(transfers.enqueue(device.id, direction, source, destination));
+      assert.equal(
+        await readFile(join(direction === 'upload' ? root : destination, 'same (1).txt'), 'utf8'),
+        'new payload',
+      );
+      assert.equal(await readFile(original, 'utf8'), 'old');
+      conflictHandler = async () => ({ choice: 'replace' });
+      await finishTransfer(transfers.enqueue(device.id, direction, source, destination));
+      assert.equal(await readFile(original, 'utf8'), 'new payload');
+    }
+    await writeFile(join(root, 'tree', 'remote-only.txt'), 'keep remote');
+    await writeFile(join(root, 'tree', 'nested', '你好.txt'), 'previous');
+    let prompts = 0;
+    conflictHandler = async (conflict) => {
+      prompts++;
+      return { choice: conflict.directory ? 'replace' : 'skip', applyToAll: true };
+    };
+    const merged = await finishTransfer(
+      transfers.enqueue(device.id, 'upload', join(downloads, 'tree'), '/'),
+    );
+    assert.equal(await readFile(join(root, 'tree', 'remote-only.txt'), 'utf8'), 'keep remote');
+    assert.equal(await readFile(join(root, 'tree', 'nested', '你好.txt'), 'utf8'), 'previous');
+    assert.equal(merged.skipped, 2);
+    assert.equal(prompts, 2);
+    conflictHandler = async (conflict) => ({
+      choice: conflict.directory && conflict.path.endsWith('/nested') ? 'keep-both' : 'replace',
+    });
+    await finishTransfer(transfers.enqueue(device.id, 'upload', join(downloads, 'tree'), '/'));
+    assert.equal(
+      await readFile(join(root, 'tree', 'nested (1)', '你好.txt'), 'utf8'),
+      'nested content',
+    );
+    assert.equal(await readFile(join(root, 'tree', 'nested', '你好.txt'), 'utf8'), 'previous');
+    await writeFile(join(root, 'same.txt'), 'safe before cancellation');
+    conflictHandler = async (_conflict, signal) =>
+      new Promise((_resolve, reject) =>
+        signal.addEventListener('abort', () => reject(new Error('cancelled conflict')), {
+          once: true,
+        }),
+      );
+    const waiting = transfers.enqueue(device.id, 'upload', join(downloads, 'same.txt'), '/');
+    await waitFor(
+      () => transfers.list().find((item) => item.id === waiting.id)?.state === 'waiting',
+    );
+    transfers.cancel(waiting.id);
+    await waitFor(() => !!transfers.list().find((item) => item.id === waiting.id)?.error);
+    assert.equal(await readFile(join(root, 'same.txt'), 'utf8'), 'safe before cancellation');
+    conflictHandler = async () => {
+      await writeFile(join(root, 'same.txt'), 'changed after confirmation');
+      return { choice: 'replace' };
+    };
+    const changedTarget = transfers.enqueue(device.id, 'upload', join(downloads, 'same.txt'), '/');
+    await waitFor(
+      () => transfers.list().find((item) => item.id === changedTarget.id)?.state === 'failed',
+    );
+    assert.match(
+      transfers.list().find((item) => item.id === changedTarget.id)!.error!,
+      /确认后发生变化/,
+    );
+    assert.equal(await readFile(join(root, 'same.txt'), 'utf8'), 'changed after confirmation');
+    assert.ok(!fs.readdirSync(root).some((name) => /nexus-part|nexus-backup/.test(name)));
+    transfers.clear(device.id);
+    assert.equal(transfers.list().length, 0);
   } finally {
     sessions.dispose();
     transfers.dispose();

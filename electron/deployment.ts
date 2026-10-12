@@ -10,12 +10,19 @@ import type {
 import { executeSSH } from './ssh';
 import { Sessions } from './sessions';
 
-export const installerSources = {
+export const XUI_VERSION = 'v3.9.0';
+export const installerSources: Record<InstallTool, string> = {
   docker: 'https://get.docker.com',
   baota: 'https://download.bt.cn/install/installStable_12.sh',
   probe: 'bundled:scripts/probe/install.sh (ServerStatus-Rust v1.8.1)',
+  '3x-ui': `https://raw.githubusercontent.com/MHSanaei/3x-ui/${XUI_VERSION}/install.sh`,
 };
-export const toolNames = { docker: 'Docker', baota: '宝塔面板', probe: 'ServerStatus 探针' };
+export const toolNames: Record<InstallTool, string> = {
+  docker: 'Docker',
+  baota: '宝塔面板',
+  probe: 'ServerStatus 探针',
+  '3x-ui': '3x-ui 面板',
+};
 export const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 export const PREFLIGHT_COMMAND = `sh -c ${shellQuote(`
 set -eu
@@ -34,6 +41,7 @@ for name in sudo bash curl unzip sha256sum systemctl docker; do
 done
 if [ -d /run/systemd/system ]; then echo systemd=1; else echo systemd=0; fi
 if [ -e /www/server/panel ]; then echo baota=1; else echo baota=0; fi
+if [ -e /usr/local/x-ui ] || [ -e /etc/x-ui ] || command -v x-ui >/dev/null 2>&1 || { command -v systemctl >/dev/null 2>&1 && systemctl cat x-ui.service >/dev/null 2>&1; }; then echo 3x-ui=1; else echo 3x-ui=0; fi
 if [ -e /etc/nexus-probe.env ] || [ -e /opt/nexus-probe/stat_client ]; then echo probe=1; else echo probe=0; fi
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet stat_client.service; then echo otherProbe=1; else echo otherProbe=0; fi
 `)}`;
@@ -78,6 +86,21 @@ export function parsePreflight(output: string, tool: InstallTool): DeploymentChe
       (fields.distribution === 'ubuntu' && !['20.04', '22.04', '24.04'].includes(fields.version))
     )
       blockers.push('请选择 Debian 11 及以上，或 Ubuntu 20.04 / 22.04 / 24.04 LTS');
+  } else if (tool === '3x-ui') {
+    if (
+      !['debian', 'ubuntu', 'fedora', 'centos', 'rhel', 'rocky', 'almalinux'].includes(
+        fields.distribution,
+      )
+    )
+      blockers.push('当前发行版不在此 3x-ui 安装入口的支持范围内');
+    if (
+      !['x86_64', 'aarch64', 'armv7l', 'armv6l', 'armv5l', 'i386', 'i686', 's390x'].includes(
+        fields.architecture,
+      )
+    )
+      blockers.push('3x-ui 不支持此 CPU 架构');
+    if (fields.systemd !== '1' || fields.systemctl !== '1')
+      blockers.push('3x-ui 自动安装需要运行中的 systemd');
   } else {
     if (!['x86_64', 'aarch64', 'armv7l'].includes(fields.architecture))
       blockers.push('探针不支持此 CPU 架构');
@@ -99,7 +122,10 @@ export function parsePreflight(output: string, tool: InstallTool): DeploymentChe
     blockers,
   };
 }
-export async function fetchInstaller(tool: 'docker' | 'baota', request: typeof fetch = fetch) {
+export async function fetchInstaller(
+  tool: Exclude<InstallTool, 'probe'>,
+  request: typeof fetch = fetch,
+) {
   const response = await request(installerSources[tool], {
     redirect: 'error',
     signal: AbortSignal.timeout(30_000),
@@ -157,6 +183,7 @@ export function deploymentCommand(
 ) {
   if (!/^\/tmp\/nexus-deploy\.[a-zA-Z0-9]+$/.test(directory)) throw new Error('远程临时目录无效');
   let args = '';
+  if (tool === '3x-ui') args = ` ${shellQuote(XUI_VERSION)}`;
   if (tool === 'probe') {
     const input = probeInstallSchema.parse(options);
     args = ` --yes --server ${shellQuote(input.server)} --group ${shellQuote(input.group)} --alias ${shellQuote(input.alias)} --location ${shellQuote(input.location)}`;
@@ -166,12 +193,14 @@ export function deploymentCommand(
   const command = `${check.root ? '' : "sudo -p '[sudo] password: ' -- "}bash -c ${shellQuote(body)}`;
   return `sh -c ${shellQuote(`cd ${shellQuote(directory)} || exit 1; trap 'rm -f -- installer.sh; cd /; rmdir -- ${directory} 2>/dev/null || true' EXIT; ${command}; result=$?; exit "$result"`)}`;
 }
-export const verificationCommands = {
+export const verificationCommands: Record<InstallTool, string> = {
   docker: 'docker version --format "{{.Server.Version}}"',
   baota:
     'panel=/www/server/panel; executable=BT-Panel; test -s "$panel/$executable" && test -s "$panel/data/port.pl" && pgrep -f "$panel/[B]T-Panel" >/dev/null',
   probe:
     'systemctl is-active --quiet nexus-probe.service && systemctl is-enabled --quiet nexus-probe.service',
+  '3x-ui':
+    'test -x /usr/local/x-ui/x-ui && systemctl is-active --quiet x-ui.service && systemctl is-enabled --quiet x-ui.service',
 };
 interface StoredPlan {
   plan: DeploymentPlan;

@@ -14,6 +14,7 @@ import {
   probeInstallSchema,
   shellQuote,
   stageInstaller,
+  XUI_VERSION,
 } from '../electron/deployment';
 import { transferName } from '../electron/transfers';
 
@@ -40,6 +41,31 @@ test('deployment checks the actual system, privileges, architecture and existing
   assert.ok(parsePreflight(checkedEnvironment({ otherProbe: '1' }), 'probe').blockers.length);
   assert.throws(() => parsePreflight('banner only', 'docker'));
   assert.throws(() => parsePreflight('__NEXUS_CHECK__\nsystem=Linux', 'probe'));
+});
+
+test('3x-ui pins its installer and release, rejects existing panels and requires systemd', async () => {
+  const check = parsePreflight(checkedEnvironment(), '3x-ui');
+  assert.deepEqual(check.blockers, []);
+  const cases: Record<string, string>[] = [
+    { '3x-ui': '1' },
+    { systemd: '0' },
+    { systemctl: '0' },
+    { architecture: 'mips' },
+    { distribution: 'alpine' },
+  ];
+  for (const fields of cases)
+    assert.ok(parsePreflight(checkedEnvironment(fields), '3x-ui').blockers.length);
+  const source = await fetchInstaller('3x-ui', (async (url, options) => {
+    assert.equal(url, `https://raw.githubusercontent.com/MHSanaei/3x-ui/${XUI_VERSION}/install.sh`);
+    assert.equal(options?.redirect, 'error');
+    return new Response('#!/bin/bash\necho pinned panel\n');
+  }) as typeof fetch);
+  assert.match(source, /pinned panel/);
+  const command = deploymentCommand('3x-ui', '/tmp/nexus-deploy.TEST123', check);
+  assert.ok(command.includes(XUI_VERSION));
+  assert.match(command, /test -x \/usr\/local\/x-ui\/x-ui/);
+  assert.match(command, /systemctl is-active --quiet x-ui.service/);
+  assert.match(command, /systemctl is-enabled --quiet x-ui.service/);
 });
 
 test('installer downloads use fixed HTTPS sources, size limits and reject redirects or active documents', async () => {
@@ -144,7 +170,7 @@ test(
   'deployment wrappers have valid shell syntax and user parameters stay literal',
   { skip: !existsSync(shell) },
   () => {
-    for (const tool of ['docker', 'baota', 'probe'] as const) {
+    for (const tool of ['docker', 'baota', 'probe', '3x-ui'] as const) {
       const command = deploymentCommand(
         tool,
         '/tmp/nexus-deploy.TEST123',

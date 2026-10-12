@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { Plus, RotateCw, X } from 'lucide-react';
+import { SearchAddon } from '@xterm/addon-search';
+import { Copy, ClipboardPaste, Search, Plus, RotateCw, X } from 'lucide-react';
 import type { Device, SessionInfo, SessionOutput } from '../shared/types';
 import { api, errorText, Modal } from './ui';
 import '@xterm/xterm/css/xterm.css';
@@ -24,7 +25,44 @@ export function TerminalPane({
 }) {
   const container = useRef<HTMLDivElement>(null);
   const resize = useRef<() => void>(() => {});
+  const terminalRef = useRef<XTerm | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const [selectedText, setSelectedText] = useState(false);
+  const [query, setQuery] = useState('');
+  const [searchMessage, setSearchMessage] = useState('');
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [error, setError] = useState('');
+  async function copy() {
+    const text = terminalRef.current?.getSelection();
+    if (!text) return;
+    try {
+      await api.writeClipboard(text);
+    } catch (failure) {
+      setError(errorText(failure));
+    }
+    setMenu(null);
+    terminalRef.current?.focus();
+  }
+  async function paste() {
+    const terminal = terminalRef.current;
+    try {
+      const text = await api.readClipboard();
+      if (terminal && terminal === terminalRef.current) {
+        terminal.paste(text);
+        terminal.focus();
+      }
+    } catch (failure) {
+      setError(errorText(failure));
+    }
+    setMenu(null);
+  }
+  function find(previous = false) {
+    const search = searchRef.current;
+    if (!search || !query) return;
+    const found = previous ? search.findPrevious(query) : search.findNext(query);
+    setSearchMessage(found ? '已定位匹配' : '没有找到');
+  }
   useEffect(() => {
     const terminal = new XTerm({
       cursorBlink: true,
@@ -41,8 +79,34 @@ export function TerminalPane({
       linkHandler: { activate: () => {} },
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
     terminal.loadAddon(fit);
+    terminal.loadAddon(search);
     terminal.open(container.current!);
+    terminalRef.current = terminal;
+    searchRef.current = search;
+    const selection = terminal.onSelectionChange(() => setSelectedText(terminal.hasSelection()));
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+      const modifier = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
+      if (modifier && key === 'c' && (event.shiftKey || event.metaKey)) {
+        event.preventDefault();
+        void copy();
+        return false;
+      }
+      if (modifier && key === 'v') {
+        event.preventDefault();
+        void paste();
+        return false;
+      }
+      if (modifier && event.shiftKey && key === 'f') {
+        event.preventDefault();
+        searchInput.current?.focus();
+        return false;
+      }
+      return true;
+    });
     let alive = true;
     let initialized = false;
     let sequence = -1;
@@ -113,6 +177,9 @@ export function TerminalPane({
       unsubscribe();
       observer.disconnect();
       input.dispose();
+      selection.dispose();
+      terminalRef.current = null;
+      searchRef.current = null;
       terminal.dispose();
       void api.detachSession(session.id).catch(() => {});
     };
@@ -122,11 +189,117 @@ export function TerminalPane({
   }, [active]);
   return (
     <div className="terminal-pane" hidden={!active} data-session-id={session.id}>
+      <div className="terminal-actions" onKeyDown={(event) => event.stopPropagation()}>
+        <button disabled={!selectedText} title="Ctrl+Shift+C" onClick={() => void copy()}>
+          <Copy size={14} />
+          复制
+        </button>
+        <button
+          disabled={!['running', 'verifying'].includes(session.state)}
+          title="Ctrl+V / Ctrl+Shift+V"
+          onClick={() => void paste()}
+        >
+          <ClipboardPaste size={14} />
+          粘贴
+        </button>
+        <button
+          onClick={() => {
+            terminalRef.current?.clear();
+            searchRef.current?.clearDecorations();
+            setSearchMessage('');
+          }}
+        >
+          清屏
+        </button>
+        <form
+          className="terminal-search"
+          onSubmit={(event) => {
+            event.preventDefault();
+            find();
+          }}
+        >
+          <Search size={14} />
+          <input
+            ref={searchInput}
+            aria-label="搜索终端内容"
+            placeholder="搜索终端内容"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setSearchMessage('');
+              if (!event.target.value) searchRef.current?.clearDecorations();
+            }}
+          />
+          <button type="button" disabled={!query} onClick={() => find(true)}>
+            上一处
+          </button>
+          <button disabled={!query}>下一处</button>
+          <span role="status">{searchMessage}</span>
+        </form>
+      </div>
       <div
         className="terminal-screen"
         ref={container}
         onKeyDown={(event) => event.stopPropagation()}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({
+            x: Math.min(event.clientX, window.innerWidth - 150),
+            y: Math.min(event.clientY, window.innerHeight - 115),
+          });
+        }}
       />
+      {menu && (
+        <div
+          className="terminal-context-backdrop"
+          onClick={() => setMenu(null)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setMenu(null);
+          }}
+        >
+          <div
+            className="terminal-context-menu"
+            role="menu"
+            style={{ left: menu.x, top: menu.y }}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Escape') {
+                setMenu(null);
+                terminalRef.current?.focus();
+              }
+            }}
+          >
+            <button
+              autoFocus={selectedText}
+              role="menuitem"
+              disabled={!selectedText}
+              onClick={() => void copy()}
+            >
+              复制选中内容
+            </button>
+            <button
+              role="menuitem"
+              autoFocus={!selectedText && ['running', 'verifying'].includes(session.state)}
+              disabled={!['running', 'verifying'].includes(session.state)}
+              onClick={() => void paste()}
+            >
+              粘贴
+            </button>
+            <button
+              role="menuitem"
+              autoFocus={!selectedText && !['running', 'verifying'].includes(session.state)}
+              onClick={() => {
+                setMenu(null);
+                searchInput.current?.focus();
+              }}
+            >
+              搜索
+            </button>
+          </div>
+        </div>
+      )}
       <div className={`session-status ${session.state}`} role="status">
         {sessionLabels[session.state]}
         {session.exitCode !== undefined && ` · 退出码 ${session.exitCode}`}
@@ -264,7 +437,8 @@ export function TerminalWorkspace({
         </p>
       )}
       <p className="helper">
-        终端内的 Esc、Tab、Ctrl+C 会发送到服务器。密码输入由远端控制是否回显。
+        Ctrl+Shift+C 复制选中内容，Ctrl+V / Ctrl+Shift+V 粘贴；右键打开菜单。Ctrl+C
+        仍发送中断。密码由远端控制回显。
       </p>
     </Modal>
   );

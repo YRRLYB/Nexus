@@ -1,12 +1,19 @@
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { createWriteStream, constants } from 'node:fs';
-import { lstat, mkdir, readdir, rename, rm, link, unlink, open } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm, open } from 'node:fs/promises';
 import { basename, join, posix, resolve, relative, isAbsolute, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Client, SFTPWrapper, Stats } from 'ssh2';
-import type { TransferTask } from '../shared/types';
+import type {
+  TransferTask,
+  TransferConflict,
+  ConflictDecision,
+  ConflictChoice,
+} from '../shared/types';
 import { withSFTP } from './ssh';
+import { TransferTarget, type TargetInfo } from './transfer-target';
 
 interface Item {
   path: string;
@@ -19,6 +26,7 @@ interface Job {
   destination: string;
   identity: string;
   controller?: AbortController;
+  decisions?: Partial<Record<'file' | 'directory', ConflictChoice>>;
 }
 const MAX_ITEMS = 10_000;
 const MAX_BYTES = 100 * 1024 ** 3;
@@ -38,24 +46,6 @@ const remoteStat = (sftp: SFTPWrapper, path: string) =>
   new Promise<Stats>((resolve, reject) =>
     sftp.lstat(path, (error, info) => (error ? reject(error) : resolve(info))),
   );
-async function remoteMissing(sftp: SFTPWrapper, path: string) {
-  try {
-    await remoteStat(sftp, path);
-  } catch (error) {
-    if ((error as { code?: number }).code === 2) return;
-    throw error;
-  }
-  throw new Error(`目标已存在，不覆盖：${path}`);
-}
-async function localMissing(path: string) {
-  try {
-    await lstat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-  throw new Error(`目标已存在，不覆盖：${path}`);
-}
 function within(parent: string, child: string) {
   const path = relative(resolve(parent), resolve(child));
   if (!path || path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
@@ -68,6 +58,12 @@ export class Transfers {
     private connect: (deviceId: string, signal?: AbortSignal) => Promise<Client>,
     private changed: (task: TransferTask) => void,
     private identity: (deviceId: string) => string = () => '',
+    private conflict: (
+      conflict: TransferConflict,
+      signal: AbortSignal,
+    ) => Promise<ConflictDecision> = async () => {
+      throw new Error('目标已存在，不覆盖');
+    },
   ) {}
   list() {
     return [...this.jobs.values()].map((job) => ({ ...job.task }));
@@ -80,7 +76,7 @@ export class Transfers {
   ) {
     if (this.jobs.size >= 100) {
       for (const [id, job] of this.jobs)
-        if (!['queued', 'running'].includes(job.task.state)) {
+        if (!['queued', 'running', 'waiting'].includes(job.task.state) && !job.controller) {
           this.jobs.delete(id);
           break;
         }
@@ -99,6 +95,7 @@ export class Transfers {
       transferred: 0,
       total: 0,
       files: 0,
+      skipped: 0,
     };
     this.jobs.set(task.id, { task, source, destination, identity: this.identity(deviceId) });
     this.changed({ ...task });
@@ -107,7 +104,7 @@ export class Transfers {
   }
   cancel(id: string) {
     const job = this.get(id);
-    if (!['queued', 'running'].includes(job.task.state)) return;
+    if (!['queued', 'running', 'waiting'].includes(job.task.state)) return;
     job.controller?.abort();
     this.update(job, { state: 'cancelled' });
   }
@@ -122,13 +119,75 @@ export class Transfers {
     if (job.controller) throw new Error('正在清理旧任务，请稍后重试');
     if (job.identity !== this.identity(job.task.deviceId))
       throw new Error('设备连接已变化，请重新创建传输任务');
-    this.update(job, { state: 'queued', transferred: 0, total: 0, files: 0, error: undefined });
+    job.decisions = {};
+    this.update(job, {
+      state: 'queued',
+      transferred: 0,
+      total: 0,
+      files: 0,
+      skipped: 0,
+      error: undefined,
+    });
     this.pump();
   }
   private get(id: string) {
     const job = this.jobs.get(id);
     if (!job) throw new Error('传输任务不存在');
     return job;
+  }
+  clear(deviceId: string) {
+    for (const [id, job] of this.jobs)
+      if (
+        job.task.deviceId === deviceId &&
+        !job.controller &&
+        ['complete', 'failed', 'cancelled'].includes(job.task.state)
+      )
+        this.jobs.delete(id);
+    return this.list();
+  }
+  private async choose(job: Job, path: string, item: Item, target: TargetInfo) {
+    const kind = item.directory ? 'directory' : 'file';
+    const remembered = job.decisions?.[kind];
+    if (remembered) {
+      if (remembered === 'replace' && target.directory !== item.directory)
+        throw new Error(`同名项目类型不同，不能覆盖文件与目录：${path}`);
+      return remembered;
+    }
+    const signal = job.controller!.signal;
+    signal.throwIfAborted();
+    this.update(job, { state: 'waiting' });
+    try {
+      const decision = await this.conflict(
+        {
+          task: { ...job.task },
+          path,
+          directory: item.directory,
+          targetDirectory: target.directory,
+          sourceSize: item.size,
+          targetSize: target.size,
+        },
+        signal,
+      );
+      signal.throwIfAborted();
+      if (decision.choice === 'replace' && target.directory !== item.directory)
+        throw new Error(`同名项目类型不同，不能覆盖文件与目录：${path}；请选择跳过或保留两份`);
+      if (decision.applyToAll) {
+        job.decisions ??= {};
+        job.decisions[kind] = decision.choice;
+      }
+      return decision.choice;
+    } finally {
+      if (!signal.aborted) this.update(job, { state: 'running' });
+    }
+  }
+  private async keepBoth(target: TransferTarget, destination: string, directory: boolean) {
+    const extension = directory ? '' : posix.extname(destination);
+    const stem = extension ? destination.slice(0, -extension.length) : destination;
+    for (let number = 1; number <= 1000; number++) {
+      const path = `${stem} (${number})${extension}`;
+      if (!(await target.info(path))) return path;
+    }
+    throw new Error('无法生成未占用的文件名');
   }
   private update(job: Job, change: Partial<TransferTask>) {
     Object.assign(job.task, change);
@@ -150,8 +209,7 @@ export class Transfers {
       void this.run(job)
         .then(
           () => {
-            if (job.task.state !== 'cancelled')
-              this.update(job, { state: 'complete', transferred: job.task.total });
+            if (job.task.state !== 'cancelled') this.update(job, { state: 'complete' });
           },
           (error) => {
             this.update(job, {
@@ -215,9 +273,33 @@ export class Transfers {
     const signal = job.controller!.signal;
     let client: Client | undefined;
     let temporary = '';
+    let ownedTemporary = false;
     const remoteFiles: string[] = [];
     const remoteDirectories: string[] = [];
-    const abort = () => client?.destroy();
+    let committing = false;
+    const abort = () => {
+      if (!committing) client?.destroy();
+    };
+    const commit = async (
+      target: TransferTarget,
+      source: string,
+      destination: string,
+      existing?: TargetInfo,
+    ) => {
+      signal.throwIfAborted();
+      committing = true;
+      try {
+        await target.commitFile(
+          source,
+          destination,
+          existing,
+          `${destination}.${job.task.id}.nexus-backup`,
+        );
+      } finally {
+        committing = false;
+        if (signal.aborted) client?.destroy();
+      }
+    };
     const timer = setTimeout(
       () => job.controller?.abort(new Error('传输超过 30 分钟')),
       30 * 60_000,
@@ -240,20 +322,26 @@ export class Transfers {
               ),
             )
           : resolve(job.destination);
-        const destination = upload
-          ? posix.join(parent, job.task.name)
-          : join(parent, job.task.name);
+        let destination = upload ? posix.join(parent, job.task.name) : join(parent, job.task.name);
         temporary = upload
           ? posix.join(parent, `.${job.task.name}.${job.task.id}.nexus-part`)
           : join(parent, `.${job.task.name}.${job.task.id}.nexus-part`);
         if (!upload) within(parent, temporary);
-        if (upload) {
-          await remoteMissing(sftp, destination);
-          await remoteMissing(sftp, temporary);
-        } else {
-          await localMissing(destination);
-          await localMissing(temporary);
+        const target = new TransferTarget(upload ? sftp : undefined);
+        let existing = await target.info(destination);
+        if (existing) {
+          const choice = await this.choose(job, destination, items[0], existing);
+          if (choice === 'skip') {
+            job.task.skipped = items.filter((item) => !item.directory).length || 1;
+            return;
+          }
+          await target.assertUnchanged(destination, existing);
+          if (choice === 'keep-both') {
+            destination = await this.keepBoth(target, destination, items[0].directory);
+            existing = undefined;
+          }
         }
+        await target.missing(temporary);
         let lastUpdate = 0;
         for (const item of items) {
           signal.throwIfAborted();
@@ -266,6 +354,7 @@ export class Transfers {
               );
               remoteDirectories.push(target);
             } else await mkdir(target, { mode: 0o700 });
+            if (!item.path) ownedTemporary = true;
             continue;
           }
           const current = upload ? await lstat(source) : await remoteStat(sftp, source);
@@ -287,42 +376,83 @@ export class Transfers {
               callback(null, chunk);
             },
           });
+          const destinationStream = upload
+            ? sftp.createWriteStream(target, { flags: 'wx', mode: 0o600 })
+            : createWriteStream(target, { flags: 'wx', mode: 0o600 });
+          await once(destinationStream, 'open', { signal });
+          if (!item.path) ownedTemporary = true;
           if (upload) remoteFiles.push(target);
           await pipeline(
             upload
               ? (await open(source, constants.O_RDONLY | constants.O_NOFOLLOW)).createReadStream()
               : sftp.createReadStream(source),
             meter,
-            upload
-              ? sftp.createWriteStream(target, { flags: 'wx', mode: 0o600 })
-              : createWriteStream(target, { flags: 'wx', mode: 0o600 }),
+            destinationStream,
             { signal },
           );
           if (received !== item.size) throw new Error('源文件在传输期间变小，已停止');
           job.task.files++;
         }
         signal.throwIfAborted();
-        if (upload) {
-          await remoteMissing(sftp, destination);
-          await new Promise<void>((resolve, reject) =>
-            sftp.rename(temporary, destination, (error) => (error ? reject(error) : resolve())),
-          );
+        if (!items[0].directory) {
+          await commit(target, temporary, destination, existing);
+          temporary = '';
+        } else if (!existing) {
+          await target.missing(destination);
+          await target.move(temporary, destination);
+          temporary = '';
         } else {
-          await localMissing(destination);
-          if (items[0].directory) await rename(temporary, destination);
-          else {
-            await link(temporary, destination);
-            await unlink(temporary);
+          await target.assertUnchanged(destination, existing);
+          const mappedDirectories = new Map<string, string | null>([['', destination]]);
+          for (const item of items.slice(1)) {
+            signal.throwIfAborted();
+            const relativeParent = posix.dirname(item.path);
+            const parentPath = mappedDirectories.get(relativeParent === '.' ? '' : relativeParent);
+            if (parentPath === null) {
+              if (item.directory) mappedDirectories.set(item.path, null);
+              else job.task.skipped = (job.task.skipped || 0) + 1;
+              continue;
+            }
+            if (!parentPath) throw new Error('目标目录未确认');
+            const parentInfo = await target.info(parentPath);
+            if (!parentInfo?.directory) throw new Error(`目标目录已变化：${parentPath}`);
+            let path = upload
+              ? posix.join(parentPath, posix.basename(item.path))
+              : join(parentPath, posix.basename(item.path));
+            let info = await target.info(path);
+            if (info) {
+              const choice = await this.choose(job, path, item, info);
+              if (choice === 'skip') {
+                if (item.directory) mappedDirectories.set(item.path, null);
+                else job.task.skipped = (job.task.skipped || 0) + 1;
+                continue;
+              }
+              await target.assertUnchanged(path, info);
+              if (choice === 'keep-both') {
+                path = await this.keepBoth(target, path, item.directory);
+                info = undefined;
+              }
+            }
+            if (item.directory) {
+              if (!info) await target.makeDirectory(path);
+              mappedDirectories.set(item.path, path);
+              continue;
+            }
+            await commit(
+              target,
+              upload ? posix.join(temporary, item.path) : join(temporary, item.path),
+              path,
+              info,
+            );
           }
         }
-        temporary = '';
         this.changed({ ...job.task });
       });
     } finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', abort);
       client?.end();
-      if (temporary) {
+      if (temporary && ownedTemporary) {
         if (job.task.direction === 'download') {
           within(job.destination, temporary);
           await rm(temporary, { recursive: true, force: true });

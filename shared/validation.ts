@@ -58,6 +58,7 @@ export const settingsSchema = z.object({
     }, '使用不含账号密码的 HTTP(S) 地址'),
   pollSeconds: z.number().int().min(5).max(300),
   staleSeconds: z.number().int().min(30).max(3600),
+  closeToTray: z.boolean().default(true),
 });
 export function remotePath(value: unknown): string {
   const path = z.string().min(1).max(4096).parse(value);

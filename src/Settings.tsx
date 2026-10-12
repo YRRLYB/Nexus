@@ -26,6 +26,22 @@ export function Settings({
   const [message, setMessage] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const bound = new Set(info.devices.map((d) => d.probe.deviceId));
+  async function saveCloseBehavior(closeToTray: boolean) {
+    const previousValue = settings.closeToTray;
+    setSettings((previous) => ({ ...previous, closeToTray }));
+    setBusy(true);
+    try {
+      const updated = await api.saveSettings({ ...info.settings, closeToTray });
+      saved(updated);
+      setSettings((previous) => ({ ...previous, closeToTray: updated.closeToTray }));
+      setMessage('关闭窗口行为已保存。');
+    } catch (failure) {
+      setSettings((previous) => ({ ...previous, closeToTray: previousValue }));
+      setMessage(errorText(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function save(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
@@ -73,7 +89,7 @@ export function Settings({
   return (
     <Modal
       title="工作台设置"
-      subtitle="连接你的探针，让设备状态自然汇聚。"
+      subtitle="配置监控接口、导入节点和后台运行。"
       close={() => !busy && close()}
     >
       <SSHGuide />
@@ -139,6 +155,28 @@ export function Settings({
           保存并连接
         </button>
       </form>
+      <label className="check">
+        <input
+          type="checkbox"
+          disabled={busy}
+          checked={settings.closeToTray !== false}
+          onChange={(event) => void saveCloseBehavior(event.target.checked)}
+        />
+        关闭主窗口时最小化到托盘
+      </label>
+      <p className="helper">
+        后台保留 SSH、传输和安装任务；在托盘右键菜单中选择「完全退出」可结束应用。
+      </p>
+      <div className="terminal-toolbar app-actions">
+        <button
+          onClick={() => void api.hideToTray().catch((error) => setMessage(errorText(error)))}
+        >
+          最小化到托盘
+        </button>
+        <button onClick={() => void api.quit().catch((error) => setMessage(errorText(error)))}>
+          完全退出
+        </button>
+      </div>
       <div className="import-section">
         <h3>
           发现的设备 <span className="count">{snapshot.nodes.length}</span>

@@ -16,6 +16,7 @@ export function checkedEnvironment(overrides: Record<string, string> = {}) {
     docker: '0',
     baota: '0',
     probe: '0',
+    '3x-ui': '0',
     otherProbe: '0',
     ...overrides,
   };

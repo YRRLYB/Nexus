@@ -89,6 +89,7 @@ export class Store {
   }
   settings(): Settings {
     return {
+      closeToTray: true,
       ...JSON.parse(
         this.get('settings', 'main') ||
           '{"probeUrl":"https://server.yrrlyb.top/json/stats.json","pollSeconds":10,"staleSeconds":90}',

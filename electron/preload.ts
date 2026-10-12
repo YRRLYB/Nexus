@@ -17,6 +17,10 @@ const api: NexusAPI = {
   discover: (id, refresh) => ipcRenderer.invoke('device:discover', id, refresh),
   windowState: () => ipcRenderer.invoke('window:state'),
   setFullScreen: (value) => ipcRenderer.invoke('window:fullscreen', value),
+  hideToTray: () => ipcRenderer.invoke('window:tray'),
+  quit: () => ipcRenderer.invoke('app:quit'),
+  readClipboard: () => ipcRenderer.invoke('clipboard:read'),
+  writeClipboard: (text) => ipcRenderer.invoke('clipboard:write', text),
   onWindowState: (callback) => {
     const listener = (_: unknown, state: { fullScreen: boolean }) => callback(state);
     ipcRenderer.on('window:state', listener);
@@ -61,6 +65,7 @@ const api: NexusAPI = {
   transfers: () => ipcRenderer.invoke('transfer:list'),
   cancelTransfer: (id) => ipcRenderer.invoke('transfer:cancel', id),
   retryTransfer: (id) => ipcRenderer.invoke('transfer:retry', id),
+  clearTransfers: (id) => ipcRenderer.invoke('transfer:clear', id),
   onTransfer: (callback) => subscribe<TransferTask>('transfer:state', callback),
   mutateRemote: (id, action, path, target) =>
     ipcRenderer.invoke('remote:mutate', id, action, path, target),

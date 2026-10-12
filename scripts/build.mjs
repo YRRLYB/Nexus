@@ -7,7 +7,7 @@ await build({
   format: 'cjs',
   external: ['electron', 'ssh2', 'sql.js'],
   sourcemap: true,
-  loader: { '.sh': 'text' },
+  loader: { '.sh': 'text', '.png': 'dataurl' },
 });
 await build({
   entryPoints: ['electron/preload.ts'],

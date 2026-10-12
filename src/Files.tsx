@@ -25,6 +25,8 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [tasks, setTasks] = useState<TransferTask[]>([]);
+  const [localFilter, setLocalFilter] = useState('');
+  const [remoteFilter, setRemoteFilter] = useState('');
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [edit, setEdit] = useState<{
     action: 'mkdir' | 'rename';
@@ -131,6 +133,12 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
       await loadRemote(remote.path);
     });
   }
+  const localEntries = local.entries.filter((file) =>
+    file.name.toLocaleLowerCase().includes(localFilter.toLocaleLowerCase()),
+  );
+  const remoteEntries = remote.entries.filter((file) =>
+    file.name.toLocaleLowerCase().includes(remoteFilter.toLocaleLowerCase()),
+  );
   const entry = (file: FileEntry, side: 'local' | 'remote') => (
     <div className="file-row" key={file.name}>
       <button
@@ -281,9 +289,18 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
               <RefreshCw size={15} />
             </button>
           </div>
+          <input
+            className="file-filter"
+            aria-label="筛选本地文件"
+            placeholder="按名称筛选"
+            value={localFilter}
+            onChange={(event) => setLocalFilter(event.target.value)}
+          />
           <div className="file-list">
-            {local.entries.map((f) => entry(f, 'local'))}
-            {!local.entries.length && <p className="file-empty">目录为空</p>}
+            {localEntries.map((file) => entry(file, 'local'))}
+            {!localEntries.length && (
+              <p className="file-empty">{localFilter ? '没有匹配文件' : '目录为空'}</p>
+            )}
           </div>
         </section>
         <section
@@ -335,10 +352,19 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
               <RefreshCw size={15} />
             </button>
           </form>
+          <input
+            className="file-filter"
+            aria-label="筛选远程文件"
+            placeholder="按名称筛选"
+            value={remoteFilter}
+            onChange={(event) => setRemoteFilter(event.target.value)}
+          />
           <div className="file-list">
-            {remote.entries.map((f) => entry(f, 'remote'))}
-            {!remote.entries.length && (
-              <p className="file-empty">{busy ? '正在连接服务器…' : '目录为空或尚未连接'}</p>
+            {remoteEntries.map((file) => entry(file, 'remote'))}
+            {!remoteEntries.length && (
+              <p className="file-empty">
+                {busy ? '正在连接服务器…' : remoteFilter ? '没有匹配文件' : '目录为空或尚未连接'}
+              </p>
             )}
           </div>
         </section>
@@ -372,8 +398,21 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
         {busy && <LoaderCircle size={16} className="spin" />}
         {busy
           ? '正在处理，请稍候…'
-          : notice || '目录会递归传输；不跟随符号链接，不覆盖已存在的目标。'}
+          : notice || '同名文件可跳过、覆盖或保留两份；同名目录可合并。不跟随符号链接。'}
       </div>
+      {tasks.some((task) => ['complete', 'failed', 'cancelled'].includes(task.state)) && (
+        <button
+          onClick={() =>
+            void api
+              .clearTransfers(device.id)
+              .then(() => api.transfers())
+              .then((items) => setTasks(items.filter((task) => task.deviceId === device.id)))
+              .catch((failure) => setError(errorText(failure)))
+          }
+        >
+          清空已结束任务
+        </button>
+      )}
       {!!tasks.length && (
         <div className="transfer-queue" aria-label="传输队列">
           {tasks
@@ -387,15 +426,17 @@ export function Files({ device, close }: { device: Device; close: () => void }) 
                     {
                       queued: '排队中',
                       running: '传输中',
+                      waiting: '等待选择',
                       complete: '已完成',
                       failed: '失败',
                       cancelled: '已取消',
                     }[task.state]
                   }{' '}
                   · {bytes(task.transferred)} / {bytes(task.total)} · {task.files} 个文件
+                  {!!task.skipped && ` · 跳过 ${task.skipped} 项`}
                 </span>
                 <div className="task-actions">
-                  {['queued', 'running'].includes(task.state) && (
+                  {['queued', 'running', 'waiting'].includes(task.state) && (
                     <button
                       onClick={() =>
                         void api

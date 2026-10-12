@@ -10,14 +10,21 @@ import type {
 import { api, errorText, Modal } from './ui';
 import { TerminalPane } from './Terminal';
 
-const names = { docker: 'Docker', baota: '宝塔面板', probe: 'ServerStatus 探针' };
-const descriptions = {
+const names: Record<InstallTool, string> = {
+  docker: 'Docker',
+  baota: '宝塔面板',
+  probe: 'ServerStatus 探针',
+  '3x-ui': '3x-ui 面板',
+};
+const descriptions: Record<InstallTool, string> = {
   docker:
     '安装 Docker Engine 和命令行组件。使用官方便利脚本，不覆盖已有 Docker。生产环境请先阅读官方说明。',
   baota:
     '安装宝塔 Linux 面板 12 稳定版。会修改软件包、服务和防火墙；建议使用干净系统，安装后检查面板端口。',
   probe:
     '安装 ServerStatus-Rust v1.8.1 客户端及 systemd 服务。需要已有探针服务端；不会新建服务端。',
+  '3x-ui':
+    '安装 3x-ui v3.9.0 面板，用于管理 Xray 服务。支持带 systemd 的 Linux / VPS；安装时在终端设置面板入口和登录信息，已有 x-ui 安装不会被覆盖。',
 };
 export function Deployment({ device, close }: { device: Device; close: () => void }) {
   const [tool, setTool] = useState<InstallTool>('docker');

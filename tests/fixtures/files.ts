@@ -12,6 +12,9 @@ export const previewPNG = Buffer.from(
 export async function startFileServer(options: { operations?: boolean } = {}) {
   const directories = new Set(['/']);
   const commands: string[] = [];
+  const shellInput: string[] = [];
+  let pausedReads = false;
+  const deferredReads: (() => void)[] = [];
   let nextTemporary = 1;
   let failInstall = false;
   let installedTool = '';
@@ -56,8 +59,16 @@ export async function startFileServer(options: { operations?: boolean } = {}) {
         session.on('window-change', (accept) => accept?.());
         session.on('shell', (accept) => {
           const stream = accept();
-          stream.write('fixture shell\r\n$ ');
-          stream.on('data', (data: Buffer) => stream.write(data));
+          stream.write('fixture shell\r\n$ \x1b[?2004h');
+          stream.on('data', (data: Buffer) => {
+            shellInput.push(data.toString());
+            stream.write(
+              data
+                .toString()
+                .replace(/\x1b\[(?:200|201)~/g, '')
+                .replaceAll('\r', '\r\n'),
+            );
+          });
         });
         session.on('exec', (accept, _reject, info) => {
           commands.push(info.command);
@@ -186,9 +197,13 @@ export async function startFileServer(options: { operations?: boolean } = {}) {
           });
           sftp.on('FSTAT', (request, handle) => sftp.attrs(request, attributes(handle.toString())));
           sftp.on('READ', (request, handle, offset, length) => {
-            const bytes = content.get(handle.toString())?.subarray(offset, offset + length);
-            if (bytes?.length) sftp.data(request, bytes);
-            else sftp.status(request, utils.sftp.STATUS_CODE.EOF);
+            const reply = () => {
+              const bytes = content.get(handle.toString())?.subarray(offset, offset + length);
+              if (bytes?.length) sftp.data(request, bytes);
+              else sftp.status(request, utils.sftp.STATUS_CODE.EOF);
+            };
+            if (pausedReads) deferredReads.push(reply);
+            else reply();
           });
           sftp.on('CLOSE', (request) => sftp.status(request, utils.sftp.STATUS_CODE.OK));
         });
@@ -199,6 +214,15 @@ export async function startFileServer(options: { operations?: boolean } = {}) {
   return {
     port: (server.address() as { port: number }).port,
     commands,
+    shellInput,
+    pauseTransfers: () => {
+      pausedReads = true;
+    },
+    resumeTransfers: () => {
+      pausedReads = false;
+      deferredReads.splice(0).forEach((reply) => reply());
+    },
+    pendingReads: () => deferredReads.length,
     failInstallation: () => {
       failInstall = true;
     },

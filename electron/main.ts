@@ -1,4 +1,15 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard, safeStorage, Menu, net } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  clipboard,
+  safeStorage,
+  Menu,
+  net,
+  Tray,
+  nativeImage,
+} from 'electron';
 import { join, resolve } from 'node:path';
 import { readFile, readdir, lstat, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -16,6 +27,7 @@ import { Sessions } from './sessions';
 import { Deployments, fetchInstaller, toolNames, probeInstallSchema } from './deployment';
 import { Transfers } from './transfers';
 import probeInstaller from '../scripts/probe/install.sh';
+import trayIcon from '../assets/icon.png';
 import {
   deviceSchema,
   inputSchema,
@@ -30,6 +42,46 @@ if (process.env.NEXUS_DATA_DIR) app.setPath('userData', resolve(process.env.NEXU
 let window: BrowserWindow;
 let store: Store;
 let quitting = false;
+let tray: Tray | undefined;
+let trayNoticeShown = false;
+function showWindow() {
+  if (!window || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+function hideToTray() {
+  if (!tray || tray.isDestroyed()) throw new Error('系统托盘不可用');
+  window.hide();
+  if (!trayNoticeShown && process.platform === 'win32') {
+    tray.displayBalloon({
+      title: 'Nexus 正在后台运行',
+      content: 'SSH、传输和部署任务继续运行。双击托盘图标返回，右键菜单可完全退出。',
+      iconType: 'info',
+    });
+    trayNoticeShown = true;
+  }
+}
+async function requestQuit() {
+  const sessionCount = sessions
+    .list()
+    .filter((item) => ['running', 'verifying'].includes(item.state)).length;
+  const transferCount = transfers
+    .list()
+    .filter((item) => ['queued', 'running', 'waiting'].includes(item.state)).length;
+  if (sessionCount || transferCount) {
+    showWindow();
+    if (
+      !(await confirm(
+        '完全退出 Nexus？',
+        `仍有 ${sessionCount} 个会话和 ${transferCount} 个传输任务。退出会关闭连接；远程安装的后台进程可能继续运行。`,
+        true,
+      ))
+    )
+      return;
+  }
+  app.quit();
+}
 const states: Record<string, PowerState> = {};
 const discoveryCache = new DiscoveryCache();
 let probeFlight: Promise<ProbeSnapshot> | undefined;
@@ -57,6 +109,28 @@ const transfers = new Transfers(
   (id, signal) => connection(id, 'sftp', signal),
   (task) => send('transfer:state', task),
   (id) => JSON.stringify(deviceWith(id, 'sftp').connection),
+  async (conflict, signal) => {
+    if (signal.aborted) throw new Error('传输已取消');
+    showWindow();
+    const differentType = conflict.directory !== conflict.targetDirectory;
+    const choices = differentType
+      ? (['skip', 'keep-both'] as const)
+      : (['skip', 'replace', 'keep-both'] as const);
+    const result = await dialog.showMessageBox(window, {
+      type: 'question',
+      message: conflict.directory ? '目标有同名目录，如何处理？' : '目标有同名文件，如何处理？',
+      detail: `${store.device(conflict.task.deviceId).name} · ${conflict.task.direction === 'upload' ? '上传' : '下载'}\n${conflict.path}\n${differentType ? '同名项目分别是文件和目录，可以跳过或保留两份。' : conflict.directory ? '合并保留目标目录中的其他文件，同名项目会继续询问。' : `源文件：${conflict.sourceSize} 字节；目标文件：${conflict.targetSize} 字节。覆盖会替换原内容。`}`,
+      buttons: differentType
+        ? ['跳过', '保留两份']
+        : ['跳过', conflict.directory ? '合并目录' : '覆盖', '保留两份'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      checkboxLabel: conflict.directory ? '应用到此任务中的同名目录' : '应用到此任务中的同名文件',
+      signal,
+    });
+    return { choice: choices[result.response] || 'skip', applyToAll: result.checkboxChecked };
+  },
 );
 function vaultAvailable() {
   return (
@@ -146,6 +220,21 @@ async function pollProbe(): Promise<ProbeSnapshot> {
   return request;
 }
 function setupIPC() {
+  register('window:tray', hideToTray);
+  register('app:quit', requestQuit);
+  register('clipboard:read', () => {
+    const text = clipboard.readText();
+    if (text.length > 64 * 1024) throw new Error('剪贴板文本超过 64 KB，请分段粘贴');
+    return text;
+  });
+  register('clipboard:write', (text) =>
+    clipboard.writeText(
+      z
+        .string()
+        .max(1024 * 1024)
+        .parse(text),
+    ),
+  );
   register('window:state', () => ({ fullScreen: window.isFullScreen() }));
   register('window:fullscreen', (value) => window.setFullScreen(z.boolean().parse(value)));
   register('bootstrap', () => ({
@@ -256,7 +345,10 @@ function setupIPC() {
     const device = deviceWith(id, 'ssh');
     deviceWith(id, 'sftp');
     if (devicePlatform(device) !== 'linux') throw new Error('自动部署仅支持 Linux 设备');
-    return deployments.prepare(device.id, z.enum(['docker', 'baota', 'probe']).parse(tool));
+    return deployments.prepare(
+      device.id,
+      z.enum(['docker', 'baota', 'probe', '3x-ui']).parse(tool),
+    );
   });
   register('deploy:start', async (id, options) => {
     const plan = deployments.get(uid(id));
@@ -276,6 +368,9 @@ function setupIPC() {
   register('transfer:list', () => transfers.list());
   register('transfer:cancel', (id) => transfers.cancel(uid(id)));
   register('transfer:retry', (id) => transfers.retry(uid(id)));
+  register('transfer:clear', (id) => {
+    transfers.clear(uid(id));
+  });
   register('device:discover', async (id, refresh = false) => {
     const d = deviceWith(id, 'ssh');
     if (devicePlatform(d) !== 'linux') throw new Error('运行识别目前支持 Linux 服务器');
@@ -506,11 +601,7 @@ function setupIPC() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => {
-    if (window) {
-      if (window.isMinimized()) window.restore();
-      window.show();
-      window.focus();
-    }
+    showWindow();
   });
   app
     .whenReady()
@@ -541,7 +632,35 @@ else {
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
+          backgroundThrottling: false,
         },
+      });
+      try {
+        tray = new Tray(nativeImage.createFromDataURL(trayIcon).resize({ width: 20, height: 20 }));
+        tray.setToolTip('Nexus');
+        tray.setContextMenu(
+          Menu.buildFromTemplate([
+            { label: '打开 Nexus', click: showWindow },
+            { type: 'separator' },
+            {
+              label: '完全退出',
+              click: () => {
+                void requestQuit();
+              },
+            },
+          ]),
+        );
+        tray.on('click', showWindow);
+        tray.on('double-click', showWindow);
+      } catch {
+        tray = undefined;
+      }
+      window.on('close', (event) => {
+        if (quitting) return;
+        event.preventDefault();
+        if (tray && !tray.isDestroyed() && store.settings().closeToTray !== false) {
+          hideToTray();
+        } else void requestQuit();
       });
       window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       window.webContents.on('will-navigate', (event) => event.preventDefault());
@@ -572,10 +691,14 @@ else {
       app.quit();
     });
 }
+app.on('before-quit', () => {
+  quitting = true;
+});
 app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => {
   quitting = true;
   sessions.dispose();
   transfers.dispose();
+  tray?.destroy();
   store?.close();
 });

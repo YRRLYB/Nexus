@@ -35,6 +35,7 @@ export interface Settings {
   probeUrl: string;
   pollSeconds: number;
   staleSeconds: number;
+  closeToTray?: boolean;
   hasToken?: boolean;
 }
 export interface ProbeNode {
@@ -79,7 +80,7 @@ export interface TransferProgress {
   transferred: number;
   total: number;
 }
-export type InstallTool = 'docker' | 'baota' | 'probe';
+export type InstallTool = 'docker' | 'baota' | 'probe' | '3x-ui';
 export interface DeploymentCheck {
   system: string;
   distribution: string;
@@ -129,11 +130,25 @@ export interface TransferTask {
   deviceId: string;
   direction: 'upload' | 'download';
   name: string;
-  state: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
+  state: 'queued' | 'running' | 'waiting' | 'complete' | 'failed' | 'cancelled';
   transferred: number;
   total: number;
   files: number;
+  skipped?: number;
   error?: string;
+}
+export interface TransferConflict {
+  task: TransferTask;
+  path: string;
+  directory: boolean;
+  sourceSize: number;
+  targetDirectory: boolean;
+  targetSize: number;
+}
+export type ConflictChoice = 'skip' | 'replace' | 'keep-both';
+export interface ConflictDecision {
+  choice: ConflictChoice;
+  applyToAll?: boolean;
 }
 export type QuickAction = 'docker' | 'services' | 'logs' | 'sysinfo';
 export type FilePreview = {
@@ -212,6 +227,10 @@ export interface NexusAPI {
   discover(id: string, refresh?: boolean): Promise<DiscoveryReport>;
   windowState(): Promise<{ fullScreen: boolean }>;
   setFullScreen(value: boolean): Promise<void>;
+  hideToTray(): Promise<void>;
+  quit(): Promise<void>;
+  readClipboard(): Promise<string>;
+  writeClipboard(text: string): Promise<void>;
   onWindowState(callback: (state: { fullScreen: boolean }) => void): () => void;
   bootstrap(): Promise<Bootstrap>;
   saveDevice(input: DeviceInput): Promise<Device>;
@@ -257,6 +276,7 @@ export interface NexusAPI {
   transfers(): Promise<TransferTask[]>;
   cancelTransfer(id: string): Promise<void>;
   retryTransfer(id: string): Promise<void>;
+  clearTransfers(deviceId: string): Promise<void>;
   onTransfer(callback: (task: TransferTask) => void): () => void;
   mutateRemote(
     id: string,
