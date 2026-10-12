@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createWriteStream, constants } from 'node:fs';
 import { lstat, mkdir, readdir, rm, open } from 'node:fs/promises';
-import { basename, join, posix, resolve, relative, isAbsolute, sep } from 'node:path';
+import { basename, extname, join, posix, resolve, relative, isAbsolute, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Client, SFTPWrapper, Stats } from 'ssh2';
@@ -180,8 +180,13 @@ export class Transfers {
       if (!signal.aborted) this.update(job, { state: 'running' });
     }
   }
-  private async keepBoth(target: TransferTarget, destination: string, directory: boolean) {
-    const extension = directory ? '' : posix.extname(destination);
+  private async keepBoth(
+    target: TransferTarget,
+    destination: string,
+    directory: boolean,
+    remote: boolean,
+  ) {
+    const extension = directory ? '' : remote ? posix.extname(destination) : extname(destination);
     const stem = extension ? destination.slice(0, -extension.length) : destination;
     for (let number = 1; number <= 1000; number++) {
       const path = `${stem} (${number})${extension}`;
@@ -337,7 +342,7 @@ export class Transfers {
           }
           await target.assertUnchanged(destination, existing);
           if (choice === 'keep-both') {
-            destination = await this.keepBoth(target, destination, items[0].directory);
+            destination = await this.keepBoth(target, destination, items[0].directory, upload);
             existing = undefined;
           }
         }
@@ -429,7 +434,7 @@ export class Transfers {
               }
               await target.assertUnchanged(path, info);
               if (choice === 'keep-both') {
-                path = await this.keepBoth(target, path, item.directory);
+                path = await this.keepBoth(target, path, item.directory, upload);
                 info = undefined;
               }
             }

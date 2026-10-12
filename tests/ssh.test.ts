@@ -501,6 +501,16 @@ test('real SSH/SFTP protocol: trust, auth, command errors, browse, transfer and 
       assert.equal(await readFile(original, 'utf8'), 'new payload');
     }
     await writeFile(join(root, 'tree', 'remote-only.txt'), 'keep remote');
+    const dottedDirectory = join(downloads, 'folder.with.dots');
+    fs.mkdirSync(dottedDirectory);
+    await writeFile(join(root, 'no-extension'), 'new content');
+    await writeFile(join(dottedDirectory, 'no-extension'), 'keep original');
+    conflictHandler = async () => ({ choice: 'keep-both' });
+    await finishTransfer(
+      transfers.enqueue(device.id, 'download', '/no-extension', dottedDirectory),
+    );
+    assert.equal(await readFile(join(dottedDirectory, 'no-extension (1)'), 'utf8'), 'new content');
+    assert.equal(await readFile(join(dottedDirectory, 'no-extension'), 'utf8'), 'keep original');
     await writeFile(join(root, 'tree', 'nested', '你好.txt'), 'previous');
     let prompts = 0;
     conflictHandler = async (conflict) => {

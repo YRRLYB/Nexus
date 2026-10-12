@@ -1,7 +1,7 @@
 {
   "name": "nexus-workspace",
   "productName": "Nexus",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A visual desktop workspace for SSH, SFTP and monitoring across your personal servers and devices",
   "author": "YRRLYB",
   "repository": {
